@@ -25,12 +25,14 @@ import (
 	"google.golang.org/grpc/reflection"
 	"istio.io/api/mesh/v1alpha1"
 	configaggregate "istio.io/istio/pilot/pkg/config/aggregate"
+	kubecredentials "istio.io/istio/pilot/pkg/credentials/kube"
 	"istio.io/istio/pilot/pkg/features"
 	istiogrpc "istio.io/istio/pilot/pkg/grpc"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/server"
 	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
 	kubecontroller "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
+	"istio.io/istio/pilot/pkg/serviceregistry/serviceentry"
 	"istio.io/istio/pilot/pkg/xds"
 	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config"
@@ -41,9 +43,12 @@ import (
 	"istio.io/istio/pkg/config/schema/kind"
 	"istio.io/istio/pkg/keepalive"
 	istiokube "istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/kube/multicluster"
 	"istio.io/istio/pkg/security"
+	"istio.io/istio/pkg/util/sets"
 	"istio.io/istio/security/pkg/server/ca/authenticate"
 	"istio.io/istio/security/pkg/server/ca/authenticate/kubeauth"
+	"istio.io/pkg/env"
 	"istio.io/pkg/ledger"
 	"istio.io/pkg/log"
 	"k8s.io/client-go/rest"
@@ -136,18 +141,28 @@ type ServerInterface interface {
 type Server struct {
 	*ServerArgs
 
-	environment      *model.Environment
-	kubeClient       higresskube.Client
-	configController model.ConfigStoreController
-	configStores     []model.ConfigStoreController
-	httpServer       *http.Server
-	httpMux          *http.ServeMux
-	grpcServer       *grpc.Server
-	xdsServer        *xds.DiscoveryServer
-	server           server.Instance
-	readinessProbes  map[string]readinessProbe
-	certServer       *cert.Server
+	environment            *model.Environment
+	kubeClient             higresskube.Client
+	multiclusterController *multicluster.Controller
+	configController       model.ConfigStoreController
+	configStores           []model.ConfigStoreController
+	serviceEntryController *serviceentry.Controller
+	httpServer             *http.Server
+	httpMux                *http.ServeMux
+	grpcServer             *grpc.Server
+	xdsServer              *xds.DiscoveryServer
+	server                 server.Instance
+	readinessProbes        map[string]readinessProbe
+	certServer             *cert.Server
 }
+
+var (
+	PodNamespace = env.RegisterStringVar("POD_NAMESPACE", "higress-system", "").Get()
+	PodName      = env.RegisterStringVar("POD_NAME", "", "").Get()
+	// Revision is the value of the Istio control plane revision, e.g. "canary",
+	// and is the value used by the "istio.io/rev" label.
+	Revision = env.Register("REVISION", "", "").Get()
+)
 
 func NewServer(args *ServerArgs) (*Server, error) {
 	e := model.NewEnvironment()
@@ -170,7 +185,7 @@ func NewServer(args *ServerArgs) (*Server, error) {
 		s.initKubeClient,
 		s.initXdsServer,
 		s.initHttpServer,
-		s.initConfigController,
+		s.initControllers,
 		s.initRegistryEventHandlers,
 		s.initAuthenticators,
 		s.initAutomaticHttps,
@@ -192,6 +207,10 @@ func NewServer(args *ServerArgs) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+func (s *Server) ServiceController() *aggregate.Controller {
+	return s.environment.ServiceDiscovery.(*aggregate.Controller)
 }
 
 // initRegistryEventHandlers sets up event handlers for config updates
@@ -217,15 +236,14 @@ func (s *Server) initRegistryEventHandlers() error {
 	return nil
 }
 
-func (s *Server) initConfigController() error {
-	ns := higressconfig.PodNamespace
+func (s *Server) initControllers() error {
 	options := common.Options{
 		Enable:               true,
 		ClusterId:            s.RegistryOptions.KubeOptions.ClusterID,
 		IngressClass:         s.IngressClass,
 		WatchNamespace:       s.WatchNamespace,
 		EnableStatus:         s.EnableStatus,
-		SystemNamespace:      higressconfig.PodNamespace,
+		SystemNamespace:      PodNamespace,
 		GatewaySelectorKey:   s.GatewaySelectorKey,
 		GatewaySelectorValue: s.GatewaySelectorValue,
 		GatewayHttpPort:      s.GatewayHttpPort,
@@ -235,7 +253,44 @@ func (s *Server) initConfigController() error {
 		options.ClusterId = ""
 	}
 
-	ingressConfig := translation.NewIngressTranslation(s.kubeClient, s.xdsServer, ns, options.ClusterId)
+	s.initMulticluster(options)
+	s.initSDSServer(options)
+	if err := s.initConfigController(options); err != nil {
+		return fmt.Errorf("error initializing config controller: %v", err)
+	}
+	if err := s.initServiceControllers(options); err != nil {
+		return fmt.Errorf("error initializing service controllers: %v", err)
+	}
+	return nil
+}
+
+func (s *Server) initMulticluster(options common.Options) {
+	if s.kubeClient == nil {
+		return
+	}
+	s.multiclusterController = multicluster.NewController(s.kubeClient, options.WatchNamespace, options.ClusterId, s.environment.Watcher)
+	s.xdsServer.ListRemoteClusters = s.multiclusterController.ListRemoteClusters
+}
+
+func (s *Server) initSDSServer(options common.Options) {
+	if s.kubeClient == nil {
+		return
+	}
+	creds := kubecredentials.NewMulticluster(options.ClusterId)
+	creds.AddSecretHandler(func(name string, namespace string) {
+		s.xdsServer.ConfigUpdate(&model.PushRequest{
+			Full:           false,
+			ConfigsUpdated: sets.New(model.ConfigKey{Kind: kind.Secret, Name: name, Namespace: namespace}),
+
+			Reason: model.NewReasonStats(model.SecretTrigger),
+		})
+	})
+	s.multiclusterController.AddHandler(creds)
+	s.environment.CredentialsController = creds
+}
+
+func (s *Server) initConfigController(options common.Options) error {
+	ingressConfig := translation.NewIngressTranslation(s.environment, s.kubeClient, s.xdsServer, options.SystemNamespace, options.ClusterId)
 	ingressConfig.AddLocalCluster(options)
 
 	s.configStores = append(s.configStores, ingressConfig)
@@ -257,9 +312,58 @@ func (s *Server) initConfigController() error {
 		go s.configController.Run(stop)
 		return nil
 	})
+
 	return nil
 }
 
+func (s *Server) initServiceControllers(options common.Options) error {
+	serviceControllers := s.ServiceController()
+
+	s.serviceEntryController = serviceentry.NewController(
+		s.configController, s.xdsServer,
+		serviceentry.WithClusterID(s.RegistryOptions.KubeOptions.ClusterID),
+	)
+	serviceControllers.AddRegistry(s.serviceEntryController)
+
+	if err := s.initKubeRegistry(options); err != nil {
+		return err
+	}
+
+	// Defer running of the service controllers.
+	s.server.RunComponent("service controllers", func(stop <-chan struct{}) error {
+		go serviceControllers.Run(stop)
+		return nil
+	})
+
+	return nil
+}
+
+// initKubeRegistry creates all the k8s service controllers under this pilot
+func (s *Server) initKubeRegistry(options common.Options) (err error) {
+	s.RegistryOptions.KubeOptions.ClusterID = options.ClusterId
+	s.RegistryOptions.KubeOptions.Metrics = s.environment
+	s.RegistryOptions.KubeOptions.XDSUpdater = s.xdsServer
+	s.RegistryOptions.KubeOptions.MeshNetworksWatcher = s.environment.NetworksWatcher
+	s.RegistryOptions.KubeOptions.MeshWatcher = s.environment.Watcher
+	s.RegistryOptions.KubeOptions.SystemNamespace = options.SystemNamespace
+	s.RegistryOptions.KubeOptions.MeshServiceController = s.ServiceController()
+	// pass namespace to k8s service registry
+	s.RegistryOptions.KubeOptions.DiscoveryNamespacesFilter = s.multiclusterController.DiscoveryNamespacesFilter
+	s.multiclusterController.AddHandler(kubecontroller.NewMulticluster(PodName,
+		s.kubeClient.Kube(),
+		s.RegistryOptions.ClusterRegistriesNamespace,
+		s.RegistryOptions.KubeOptions,
+		s.serviceEntryController,
+		s.configController,
+		//s.istiodCertBundleWatcher,
+		nil,
+		Revision,
+		false,
+		s.environment.ClusterLocal(),
+		s.server))
+
+	return
+}
 func (s *Server) Start(stop <-chan struct{}) error {
 	if err := s.server.Start(stop); err != nil {
 		return err
