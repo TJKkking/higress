@@ -365,6 +365,9 @@ func (s *Server) initKubeRegistry(options common.Options) (err error) {
 	return
 }
 func (s *Server) Start(stop <-chan struct{}) error {
+	if err := s.multiclusterController.Run(stop); err != nil {
+		return err
+	}
 	if err := s.server.Start(stop); err != nil {
 		return err
 	}
