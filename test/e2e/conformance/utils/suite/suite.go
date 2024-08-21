@@ -73,6 +73,9 @@ type Options struct {
 
 	// IsEnvoyConfigTest indicates whether or not the test is for envoy config
 	IsEnvoyConfigTest bool
+
+	// IsIngress2Gateway indicates whether or not the test is for ingress2gatewayapi config
+	IsIngress2Gateway bool
 }
 
 type WASMOptions struct {
@@ -103,6 +106,8 @@ func New(s Options) *ConformanceTestSuite {
 		}
 	} else if s.IsEnvoyConfigTest {
 		s.SupportedFeatures.Insert(string(EnvoyConfigConformanceFeature))
+	} else if s.IsIngress2Gateway {
+		s.SupportedFeatures.Insert(string(Ingress2GatewayConformanceFeature))
 	} else if s.EnableAllSupportedFeatures {
 		s.SupportedFeatures = AllFeatures
 	}

@@ -35,6 +35,9 @@ const (
 
 	// extended: envoy config
 	EnvoyConfigConformanceFeature SupportedFeature = "envoy-config"
+
+	// extended: ingress2gatewayapi conifg
+	Ingress2GatewayConformanceFeature SupportedFeature = "ingress2gateway"
 )
 
 var WasmPluginTypeMap = map[string]SupportedFeature{
@@ -50,7 +53,8 @@ var AllFeatures = sets.Set{}.
 	Insert(string(EurekaConformanceFeature)).
 	Insert(string(ConsulConformanceFeature)).
 	Insert(string(NacosConformanceFeature)).
-	Insert(string(EnvoyConfigConformanceFeature))
+	Insert(string(EnvoyConfigConformanceFeature)).
+	Insert(string(Ingress2GatewayConformanceFeature))
 
 var ExperimentFeatures = sets.Set{}.
 	Insert(string(WASMGoConformanceFeature)).

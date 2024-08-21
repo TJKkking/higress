@@ -180,8 +180,11 @@ install: pre-install
 ENVOY_LATEST_IMAGE_TAG ?= sha-59acb61
 ISTIO_LATEST_IMAGE_TAG ?= sha-59acb61
 
-install-dev: pre-install
-	helm install higress helm/core -n higress-system --create-namespace --set 'controller.tag=$(TAG)' --set 'gateway.replicas=1' --set 'pilot.tag=$(ISTIO_LATEST_IMAGE_TAG)' --set 'gateway.tag=$(ENVOY_LATEST_IMAGE_TAG)' --set 'global.local=true'
+install-gateway-api-crd:
+	kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.0.0/experimental-install.yaml
+
+install-dev: pre-install install-gateway-api-crd
+	helm install higress helm/core -n higress-system --create-namespace --set 'controller.tag=$(TAG)' --set 'gateway.replicas=1' --set 'pilot.tag=$(ISTIO_LATEST_IMAGE_TAG)' --set 'gateway.tag=$(ENVOY_LATEST_IMAGE_TAG)' --set 'global.local=true' --set 'global.enableGatewayAPI-true'
 install-dev-wasmplugin: build-wasmplugins pre-install
 	helm install higress helm/core -n higress-system --create-namespace --set 'controller.tag=$(TAG)' --set 'gateway.replicas=1' --set 'pilot.tag=$(ISTIO_LATEST_IMAGE_TAG)' --set 'gateway.tag=$(ENVOY_LATEST_IMAGE_TAG)' --set 'global.local=true'  --set 'global.volumeWasmPlugins=true' --set 'global.onlyPushRouteCluster=false'
 
@@ -326,6 +329,15 @@ run-higress-e2e-test-clean:
 	@echo -e "\n\033[36mWaiting higress-gateway to be ready...\033[0m\n"
 	kubectl wait --timeout=10m -n higress-system deployment/higress-gateway --for=condition=Available
 	go test -v -tags conformance ./test/e2e/e2e_test.go --ingress-class=higress --debug=true --test-area=clean
+
+.PHONY: run-higress-e2e-test-ingress2gateway-run
+run-higress-e2e-test-ingress2gateway-run:
+	@echo -e "\n\033[36mRunning higress conformance tests...\033[0m"
+	@echo -e "\n\033[36mWaiting higress-controller to be ready...\033[0m\n"
+	kubectl wait --timeout=10m -n higress-system deployment/higress-controller --for=condition=Available
+	@echo -e "\n\033[36mWaiting higress-gateway to be ready...\033[0m\n"
+	kubectl wait --timeout=10m -n higress-system deployment/higress-gateway --for=condition=Available
+	go test -v -tags conformance ./test/e2e/e2e_test.go --ingress-class=higress --debug=true --test-area=run --isIngress2Gateway=true
 
 # run-higress-e2e-test-wasmplugin-setup starts to prepare ingress e2e tests.
 .PHONY: run-higress-e2e-test-wasmplugin-setup

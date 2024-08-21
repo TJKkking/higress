@@ -54,6 +54,7 @@ func TestHigressConformanceTests(t *testing.T) {
 		GatewayAddress:             "localhost",
 		EnableAllSupportedFeatures: true,
 		IsEnvoyConfigTest:          *flags.IsEnvoyConfigTest,
+		IsIngress2Gateway:          *flags.IsIngress2Gateway,
 	})
 
 	// Run the test suite

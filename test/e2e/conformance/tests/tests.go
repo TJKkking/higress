@@ -14,7 +14,15 @@
 
 package tests
 
-import "github.com/alibaba/higress/test/e2e/conformance/utils/suite"
+import (
+	"fmt"
+	"os/exec"
+	"testing"
+
+	"github.com/alibaba/higress/test/e2e/conformance/utils/ingress2gateway"
+	"github.com/alibaba/higress/test/e2e/conformance/utils/suite"
+	"github.com/stretchr/testify/require"
+)
 
 func Register(testcase suite.ConformanceTest) {
 	if len(testcase.Features) == 0 {
@@ -24,3 +32,28 @@ func Register(testcase suite.ConformanceTest) {
 }
 
 var ConformanceTests []suite.ConformanceTest
+
+func ToGatewayResource(t *testing.T, suite *suite.ConformanceTestSuite, ipath string) {
+	gwResource, err := ingress2gateway.ConvertYAMLToClientObjects(ReadFromFile(ipath))
+	if err != nil {
+		require.NoErrorf(t, err, "error translate ingress to gatewayapi")
+		t.Fatalf("failed to convert ingress to gateway resource: %v", err)
+	}
+
+	suite.Applier.MustApplyObjectsWithCleanup(t, suite.Client, suite.TimeoutConfig, gwResource, suite.Cleanup)
+	t.Logf("🧳 Ingress: %s translate to Gateway resource successfully", ipath)
+}
+
+func ReadFromFile(fp string) []byte {
+	basePath := "./conformance/"
+	iPath := basePath + fp
+
+	cmd := exec.Command("./conformance/utils/ingress2gateway/ingress2gateway", "print",
+		"--providers", "higress", "--namespace", "higress-conformance-infra", "--input-file", iPath)
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Println("error: ", err)
+		return nil
+	}
+	return output
+}
