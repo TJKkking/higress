@@ -114,9 +114,12 @@ func (gc GatewayContext) ResolveGatewayInstances(
 			log.Infof("[tjk]Try to find service in higress-system namespace")
 			defaultGatewayNamespace := "higress-system"
 			defaultGateway := "higress-gateway"
+			log.Infof("[tjk]gc.si.HostnameAndNamespace[higress-gateway]: %v", gc.si.HostnameAndNamespace[host.Name(defaultGateway)])
 			svc, f = gc.si.HostnameAndNamespace[host.Name(defaultGateway)][defaultGatewayNamespace]
 			if !f {
-				continue
+				log.Infof("[tjk]hit svc %v not found, should continue", svc)
+				// continue
+				svc = gc.si.HostnameAndNamespace[host.Name(g)][defaultGatewayNamespace]
 			}
 		}
 		svcKey := svc.Key()
