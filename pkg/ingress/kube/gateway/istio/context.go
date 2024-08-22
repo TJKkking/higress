@@ -85,11 +85,11 @@ func (gc GatewayContext) ResolveGatewayInstances(
 		}
 	}
 	// End - Added by Higress
-	log.Infof("[tjk]len(gwsvcs)=%d", len(gwsvcs))
 	for _, g := range gwsvcs {
 		// Start - Updated by Higress)
 		log.Infof("[tjk]try to resolve gateway %s in namespace %s", g, namespace)
 		svc, f := gc.si.HostnameAndNamespace[host.Name(g)][namespace]
+		// tjk: always cant find svc in namespace, try to find in higress-system namespace
 		log.Infof("[tjk]find: svc=%v, f=%v", svc, f)
 		// End - Updated by Higress
 		if !f {
@@ -99,40 +99,35 @@ func (gc GatewayContext) ResolveGatewayInstances(
 			for ns := range gc.si.HostnameAndNamespace[host.Name(g)] {
 				otherNamespaces = append(otherNamespaces, `"`+ns+`"`) // Wrap in quotes for output
 			}
-			log.Infof("[tjk]otherNamespaces=%v", otherNamespaces)
 			if len(otherNamespaces) > 0 {
 				sort.Strings(otherNamespaces)
 				warnings = append(warnings, fmt.Sprintf("hostname %q not found in namespace %q, but it was found in namespace(s) %v",
 					g, namespace, strings.Join(otherNamespaces, ", ")))
 				log.Infof(fmt.Sprintf("[tjk]hostname %q not found in namespace %q, but it was found in namespace(s) %v",
 					g, namespace, strings.Join(otherNamespaces, ", ")))
+				// tjk
+				log.Infof("[tjk]Try to find service in higress-system namespace")
+				defaultGatewayNamespace := "higress-system"
+				svc, f = gc.si.HostnameAndNamespace[host.Name(g)][defaultGatewayNamespace]
 			} else {
 				warnings = append(warnings, fmt.Sprintf("hostname %q not found", g))
 				log.Infof(fmt.Sprintf("[tjk]hostname %q not found", g))
 			}
 			// continue
-			log.Infof("[tjk]Try to find service in higress-system namespace")
-			defaultGatewayNamespace := "higress-system"
-			defaultGateway := "higress-gateway"
-			log.Infof("[tjk]gc.si.HostnameAndNamespace[higress-gateway]: %v", gc.si.HostnameAndNamespace[host.Name(defaultGateway)])
-			svc, f = gc.si.HostnameAndNamespace[host.Name(defaultGateway)][defaultGatewayNamespace]
-			if !f {
-				log.Infof("[tjk]hit svc %v not found, should continue", svc)
-				// continue
-				svc = gc.si.HostnameAndNamespace[host.Name(g)][defaultGatewayNamespace]
-			}
+		}
+		if !f {
+			log.Infof("[tjk]hit svc %v found in higress-system namespace", svc.Hostname)
+			continue
 		}
 		svcKey := svc.Key()
-		log.Infof("[tjk]Found svc %v, svcKey=%s", svc, svcKey)
-		log.Infof("[tjk]len(ports)=%d of service %s", len(ports), servers)
 		for port := range ports {
 			// Start - Updated by Higress
 			log.Infof("[tjk]try to resolve port %d of service %s", port, g)
 			instances := gc.si.ServiceInstancesByPort(svc, port, nil)
 			log.Infof("[tjk]len(instances)=%d of service %s:%d", len(instances), g, port)
-			foundInternal.Insert(fmt.Sprintf("%s:%d", g, port))
 			// End - Updated by Higress
 			if len(instances) > 0 {
+				log.Infof("[tjk]found instances for service %s:%d, insert to foundInternal", g, port)
 				foundInternal.Insert(fmt.Sprintf("%s:%d", g, port))
 				if svc.Attributes.ClusterExternalAddresses.Len() > 0 {
 					// Fetch external IPs from all clusters
@@ -146,11 +141,15 @@ func (gc GatewayContext) ResolveGatewayInstances(
 					}
 				}
 			} else {
+				if svc.Hostname == "higress-gateway.higress-system.svc.cluster.local" {
+					log.Infof("[tjk]higress-gateway.higress-system.svc.cluster.local jijijiji")
+				}
 				// Start - Updated by Higress
 				instancesByPort := gc.si.ServiceInstances(svcKey)
 				// End - Updated by Higress
 				if instancesEmpty(instancesByPort) {
 					warnings = append(warnings, fmt.Sprintf("no instances found for hostname %q", g))
+					log.Infof(fmt.Sprintf("[tjk]no instances found for hostname %q", g))
 				} else {
 					hintPort := sets.New[string]()
 					for _, instances := range instancesByPort {
@@ -161,8 +160,6 @@ func (gc GatewayContext) ResolveGatewayInstances(
 						}
 					}
 					if hintPort.Len() > 0 {
-						// add by tjk
-						foundInternal.Insert(fmt.Sprintf("%s:%d", g, hintPort))
 						warnings = append(warnings, fmt.Sprintf(
 							"port %d not found for hostname %q (hint: the service port should be specified, not the workload port. Did you mean one of these ports: %v?)",
 							port, g, sets.SortedList(hintPort)))

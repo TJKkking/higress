@@ -276,11 +276,18 @@ func (c *Controller) buildServiceIndex() *serviceIndex {
 				si.instancesByPort[svcKey] = make(map[int][]*model.ServiceInstance)
 			}
 			instances := make([]*model.ServiceInstance, 0)
-			log.Infof("[tjk]buildServiceIndex: try to get instances for service %s:%d", s.Hostname, port.Port)
 			instances = append(instances, env.InstancesByPort(s, port.Port)...)
-			log.Infof("[tjk]buildServiceIndex: len(instances)=%d of service %s:%d", len(instances), s.Hostname, port.Port)
+			if len(instances) > 0 {
+				log.Infof("[tjk]buildServiceIndex: len(instances)=%d of service %s:%d", len(instances), s.Hostname, port.Port)
+			}
 			si.instancesByPort[svcKey][port.Port] = instances
 			log.Infof("[tjk]buildServiceIndex: Inserted instances for service %s:%d, instance: %v", s.Hostname, port.Port, instances)
+			if s.Hostname == "higress-gateway.higress-system.svc.cluster.local" {
+				// print instances details
+				for _, instance := range instances {
+					log.Infof("[tjk]buildServiceIndex: instance: %v", instance)
+				}
+			}
 		}
 
 		if _, f := si.HostnameAndNamespace[s.Hostname]; !f {
