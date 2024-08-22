@@ -101,8 +101,8 @@ func (gc GatewayContext) ResolveGatewayInstances(
 			}
 			if len(otherNamespaces) > 0 {
 				sort.Strings(otherNamespaces)
-				warnings = append(warnings, fmt.Sprintf("hostname %q not found in namespace %q, but it was found in namespace(s) %v",
-					g, namespace, strings.Join(otherNamespaces, ", ")))
+				// warnings = append(warnings, fmt.Sprintf("hostname %q not found in namespace %q, but it was found in namespace(s) %v",
+				// g, namespace, strings.Join(otherNamespaces, ", ")))
 				log.Infof(fmt.Sprintf("[tjk]hostname %q not found in namespace %q, but it was found in namespace(s) %v",
 					g, namespace, strings.Join(otherNamespaces, ", ")))
 				// tjk

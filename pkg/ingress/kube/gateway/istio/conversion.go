@@ -1780,7 +1780,9 @@ func reportGatewayStatus(
 	} else if len(warnings) > 0 {
 		var msg string
 		if len(internal) != 0 {
-			msg = fmt.Sprintf("Assigned to service(s) %s, but failed to assign to all requested addresses: %s",
+			// msg = fmt.Sprintf("Assigned to service(s) %s, but failed to assign to all requested addresses: %s",
+			// humanReadableJoin(internal), strings.Join(warnings, "; "))
+			log.Infof("[tjk]Assigned to service(s) %s, but failed to assign to all requested addresses: %s",
 				humanReadableJoin(internal), strings.Join(warnings, "; "))
 		} else {
 			msg = fmt.Sprintf("Failed to assign to any requested addresses: %s", strings.Join(warnings, "; "))
