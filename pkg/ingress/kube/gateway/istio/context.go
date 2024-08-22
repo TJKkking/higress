@@ -58,6 +58,7 @@ func (gc GatewayContext) ResolveGatewayInstances(
 	servers []*networking.Server,
 ) (internal, external, pending, warns []string) {
 	ports := map[int]struct{}{}
+	log.Infof("[tjk]ResolveGatewayInstances: len(servers)=%d", len(servers))
 	for _, s := range servers {
 		ports[int(s.Port.Number)] = struct{}{}
 	}
@@ -66,7 +67,7 @@ func (gc GatewayContext) ResolveGatewayInstances(
 	foundPending := sets.New[string]()
 	warnings := []string{}
 	// Start - Added by Higress
-	if gatewaySelector != nil && len(gatewaySelector) != 0 {
+	if len(gatewaySelector) != 0 {
 		gwsvcs = append([]string{}, gwsvcs...)
 		for _, svc := range gc.si.all {
 			matches := true
@@ -101,9 +102,11 @@ func (gc GatewayContext) ResolveGatewayInstances(
 			continue
 		}
 		svcKey := svc.Key()
+		log.Infof("[tjk]len(ports)=%d of service %s", len(ports), servers)
 		for port := range ports {
 			// Start - Updated by Higress
 			instances := gc.si.ServiceInstancesByPort(svc, port, nil)
+			log.Infof("[tjk]len(instances)=%d of service %s:%d", len(instances), g, port)
 			// End - Updated by Higress
 			if len(instances) > 0 {
 				foundInternal.Insert(fmt.Sprintf("%s:%d", g, port))

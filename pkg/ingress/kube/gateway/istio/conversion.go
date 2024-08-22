@@ -1603,6 +1603,8 @@ func convertGateways(r configContext) ([]config.Config, map[parentKey][]*parentI
 			continue
 		}
 		// End - Updated by Higress
+		log.Infof("[tjk]Converting Gateway %s/%s", obj.Namespace, obj.Name)
+		log.Infof("[tjk]Gateway %s/%s has %d listeners", obj.Namespace, obj.Name, len(kgw.Listeners))
 		for i, l := range kgw.Listeners {
 			i := i
 			namespaceLabelReferences.InsertAll(getNamespaceLabelReferences(l.AllowedRoutes)...)
@@ -1611,6 +1613,8 @@ func convertGateways(r configContext) ([]config.Config, map[parentKey][]*parentI
 				continue
 			}
 			servers = append(servers, server)
+			log.Infof("[tjk]server %d: %v", i, server)
+			log.Infof("[tjk] len()servers: %d", len(servers))
 			if controllerName == constants.ManagedGatewayMeshController {
 				// Waypoint doesn't actually convert the routes to VirtualServices
 				continue
@@ -1736,6 +1740,7 @@ func reportGatewayStatus(
 	gatewayErr *ConfigError,
 ) {
 	// TODO: we lose address if servers is empty due to an error
+	log.Infof("[tjk]len(servers): %d", len(servers))
 	// Start - Updated by Higress
 	internal, external, pending, warnings := r.Context.ResolveGatewayInstances(obj.Namespace, gatewayServices, gatewaySelector, servers)
 	// End - Updated by Higress
