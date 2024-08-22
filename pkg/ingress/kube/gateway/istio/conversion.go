@@ -1780,20 +1780,19 @@ func reportGatewayStatus(
 	} else if len(warnings) > 0 {
 		var msg string
 		if len(internal) != 0 {
-			// msg = fmt.Sprintf("Assigned to service(s) %s, but failed to assign to all requested addresses: %s",
-			// humanReadableJoin(internal), strings.Join(warnings, "; "))
-			log.Infof("[tjk]Assigned to service(s) %s, but failed to assign to all requested addresses: %s",
+			msg = fmt.Sprintf("Assigned to service(s) %s, but failed to assign to all requested addresses: %s",
 				humanReadableJoin(internal), strings.Join(warnings, "; "))
+			log.Infof("[tjk]Assigned to service(s) %s, msg: %s", humanReadableJoin(internal), msg)
 		} else {
 			msg = fmt.Sprintf("Failed to assign to any requested addresses: %s", strings.Join(warnings, "; "))
 		}
-		gatewayConditions[string(k8sbeta.GatewayConditionProgrammed)].error = &ConfigError{
-			// TODO(https://github.com/kubernetes-sigs/gateway-api/issues/1832#issuecomment-1487167378): Invalid is bad,
-			// this should be AddressNotAssigned
-			// TODO: this only checks Service ready, we should also check Deployment ready?
-			Reason:  string(k8sbeta.GatewayReasonInvalid),
-			Message: msg,
-		}
+		// gatewayConditions[string(k8sbeta.GatewayConditionProgrammed)].error = &ConfigError{
+		// 	// TODO(https://github.com/kubernetes-sigs/gateway-api/issues/1832#issuecomment-1487167378): Invalid is bad,
+		// 	// this should be AddressNotAssigned
+		// 	// TODO: this only checks Service ready, we should also check Deployment ready?
+		// 	Reason:  string(k8sbeta.GatewayReasonInvalid),
+		// 	Message: msg,
+		// }
 	}
 	obj.Status.(*kstatus.WrappedStatus).Mutate(func(s config.Status) config.Status {
 		gs := s.(*k8s.GatewayStatus)
