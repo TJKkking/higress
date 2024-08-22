@@ -1741,7 +1741,6 @@ func reportGatewayStatus(
 	gatewayErr *ConfigError,
 ) {
 	// TODO: we lose address if servers is empty due to an error
-	log.Infof("[tjk]len(servers): %d", len(servers))
 	// Start - Updated by Higress
 	internal, external, pending, warnings := r.Context.ResolveGatewayInstances(obj.Namespace, gatewayServices, gatewaySelector, servers)
 	// End - Updated by Higress
