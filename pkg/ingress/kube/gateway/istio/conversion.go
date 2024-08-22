@@ -1614,15 +1614,16 @@ func convertGateways(r configContext) ([]config.Config, map[parentKey][]*parentI
 			}
 			servers = append(servers, server)
 			log.Infof("[tjk]server %d: %v", i, server)
-			log.Infof("[tjk] len()servers: %d", len(servers))
 			if controllerName == constants.ManagedGatewayMeshController {
 				// Waypoint doesn't actually convert the routes to VirtualServices
 				continue
 			}
 			meta := parentMeta(obj, &l.Name)
+			log.Infof("len(gatewayServices): %d", len(gatewayServices))
 			if len(gatewayServices) != 0 {
 				meta[model.InternalGatewayServiceAnnotation] = strings.Join(gatewayServices, ",")
 			} else if useDefaultService {
+				log.Infof("[tjk]hit useDefaultService")
 				gatewaySelector = r.GatewayResources.DefaultGatewaySelector
 			} else {
 				// Protective programming. This shouldn't happen.

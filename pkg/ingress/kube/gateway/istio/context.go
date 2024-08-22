@@ -67,6 +67,7 @@ func (gc GatewayContext) ResolveGatewayInstances(
 	foundPending := sets.New[string]()
 	warnings := []string{}
 	// Start - Added by Higress
+	log.Infof("[tjk]gatewaySelector=%v", gatewaySelector)
 	if len(gatewaySelector) != 0 {
 		gwsvcs = append([]string{}, gwsvcs...)
 		for _, svc := range gc.si.all {
