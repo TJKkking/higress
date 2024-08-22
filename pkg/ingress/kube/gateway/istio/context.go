@@ -70,7 +70,9 @@ func (gc GatewayContext) ResolveGatewayInstances(
 	log.Infof("[tjk]gatewaySelector=%v", gatewaySelector)
 	if len(gatewaySelector) != 0 {
 		gwsvcs = append([]string{}, gwsvcs...)
+		log.Infof("all svc: %v", gc.si.all)
 		for _, svc := range gc.si.all {
+			log.Infof("[tjk]all svc: %v", svc)
 			matches := true
 			for k, v := range gatewaySelector {
 				if svc.Attributes.Labels[k] != v {
@@ -90,10 +92,6 @@ func (gc GatewayContext) ResolveGatewayInstances(
 		log.Infof("[tjk]try to resolve gateway %s in namespace %s", g, namespace)
 		svc, f := gc.si.HostnameAndNamespace[host.Name(g)][namespace]
 		log.Infof("[tjk]find: svc=%v, f=%v", svc, f)
-		// print all services
-		for _, svc := range gc.si.all {
-			log.Infof("[tjk]all svc: %v", svc)
-		}
 		// End - Updated by Higress
 		if !f {
 			log.Infof("[tjk]hit svc %v not found, continue", svc)

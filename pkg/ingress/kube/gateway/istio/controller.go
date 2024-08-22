@@ -18,9 +18,10 @@ package istio
 
 import (
 	"fmt"
-	"istio.io/istio/pkg/config/visibility"
 	"sync"
 	"time"
+
+	"istio.io/istio/pkg/config/visibility"
 
 	"go.uber.org/atomic"
 	"istio.io/istio/pilot/pkg/credentials"
@@ -313,6 +314,10 @@ func (c *Controller) buildServiceIndex() *serviceIndex {
 				}
 			}
 		}
+	}
+	// print all services
+	for _, s := range si.all {
+		log.Infof("[tjk]buildServiceIndex output: all service: %v", s)
 	}
 
 	return si
