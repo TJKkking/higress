@@ -84,11 +84,19 @@ func (gc GatewayContext) ResolveGatewayInstances(
 		}
 	}
 	// End - Added by Higress
+	log.Infof("[tjk]len(gwsvcs)=%d", len(gwsvcs))
 	for _, g := range gwsvcs {
-		// Start - Updated by Higress
+		// Start - Updated by Higress)
+		log.Infof("[tjk]try to resolve gateway %s in namespace %s", g, namespace)
 		svc, f := gc.si.HostnameAndNamespace[host.Name(g)][namespace]
+		log.Infof("[tjk]find: svc=%v, f=%v", svc, f)
+		// print all services
+		for _, svc := range gc.si.all {
+			log.Infof("[tjk]all svc: %v", svc)
+		}
 		// End - Updated by Higress
 		if !f {
+			log.Infof("[tjk]hit svc %v not found, continue", svc)
 			otherNamespaces := []string{}
 			for ns := range gc.si.HostnameAndNamespace[host.Name(g)] {
 				otherNamespaces = append(otherNamespaces, `"`+ns+`"`) // Wrap in quotes for output
