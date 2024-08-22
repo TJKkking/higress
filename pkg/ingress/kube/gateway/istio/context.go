@@ -72,7 +72,6 @@ func (gc GatewayContext) ResolveGatewayInstances(
 		gwsvcs = append([]string{}, gwsvcs...)
 		log.Infof("all svc: %v", gc.si.all)
 		for _, svc := range gc.si.all {
-			log.Infof("[tjk]all svc: %v", svc)
 			matches := true
 			for k, v := range gatewaySelector {
 				if svc.Attributes.Labels[k] != v {
@@ -96,17 +95,28 @@ func (gc GatewayContext) ResolveGatewayInstances(
 		if !f {
 			log.Infof("[tjk]hit svc %v not found, continue", svc)
 			otherNamespaces := []string{}
+			log.Infof("[tjk]gc.si.HostnameAndNamespace[host.Name(g)]=%v", gc.si.HostnameAndNamespace[host.Name(g)])
 			for ns := range gc.si.HostnameAndNamespace[host.Name(g)] {
 				otherNamespaces = append(otherNamespaces, `"`+ns+`"`) // Wrap in quotes for output
 			}
+			log.Infof("[tjk]otherNamespaces=%v", otherNamespaces)
 			if len(otherNamespaces) > 0 {
 				sort.Strings(otherNamespaces)
 				warnings = append(warnings, fmt.Sprintf("hostname %q not found in namespace %q, but it was found in namespace(s) %v",
 					g, namespace, strings.Join(otherNamespaces, ", ")))
+				log.Infof(fmt.Sprintf("[tjk]hostname %q not found in namespace %q, but it was found in namespace(s) %v",
+					g, namespace, strings.Join(otherNamespaces, ", ")))
 			} else {
 				warnings = append(warnings, fmt.Sprintf("hostname %q not found", g))
+				log.Infof(fmt.Sprintf("[tjk]hostname %q not found", g))
 			}
-			continue
+			// continue
+			log.Infof("[tjk]Try to find service in higress-system namespace")
+			gatewayNamespace := "higress-system"
+			svc, f = gc.si.HostnameAndNamespace[host.Name(g)][gatewayNamespace]
+			if !f {
+				continue
+			}
 		}
 		svcKey := svc.Key()
 		log.Infof("[tjk]len(ports)=%d of service %s", len(ports), servers)
