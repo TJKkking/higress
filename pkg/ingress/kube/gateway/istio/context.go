@@ -130,6 +130,7 @@ func (gc GatewayContext) ResolveGatewayInstances(
 			log.Infof("[tjk]try to resolve port %d of service %s", port, g)
 			instances := gc.si.ServiceInstancesByPort(svc, port, nil)
 			log.Infof("[tjk]len(instances)=%d of service %s:%d", len(instances), g, port)
+			foundInternal.Insert(fmt.Sprintf("%s:%d", g, port))
 			// End - Updated by Higress
 			if len(instances) > 0 {
 				foundInternal.Insert(fmt.Sprintf("%s:%d", g, port))
