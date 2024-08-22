@@ -267,7 +267,6 @@ func (c *Controller) buildServiceIndex() *serviceIndex {
 
 	// Sort the services in order of creation.
 	allServices := model.SortServicesByCreationTime(env.Services())
-	log.Infof("[tjk]buildServiceIndex input: all services: %v", allServices)
 	si.all = append(si.all, allServices...)
 	for _, s := range allServices {
 		svcKey := s.Key()
@@ -279,6 +278,7 @@ func (c *Controller) buildServiceIndex() *serviceIndex {
 			instances := make([]*model.ServiceInstance, 0)
 			instances = append(instances, env.InstancesByPort(s, port.Port)...)
 			si.instancesByPort[svcKey][port.Port] = instances
+			log.Infof("buildServiceIndex: Inerted instances for service %s:%d: %v", s, port.Port, instances)
 		}
 
 		if _, f := si.HostnameAndNamespace[s.Hostname]; !f {
@@ -316,8 +316,14 @@ func (c *Controller) buildServiceIndex() *serviceIndex {
 			}
 		}
 	}
+	// print si.instancesByPort
+	for k, v := range si.instancesByPort {
+		log.Infof("[tjk]buildServiceIndex instancesByPort: %s=%v", k, v)
+	}
 	// print all services
-	log.Infof("[tjk]buildServiceIndex output: all services: %v", si.all)
+	for _, s := range si.all {
+		log.Infof("[tjk]buildServiceIndex service: %v", s)
+	}
 
 	return si
 }

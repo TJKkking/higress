@@ -112,16 +112,19 @@ func (gc GatewayContext) ResolveGatewayInstances(
 			}
 			// continue
 			log.Infof("[tjk]Try to find service in higress-system namespace")
-			gatewayNamespace := "higress-system"
-			svc, f = gc.si.HostnameAndNamespace[host.Name(g)][gatewayNamespace]
+			defaultGatewayNamespace := "higress-system"
+			defaultGateway := "higress-gateway"
+			svc, f = gc.si.HostnameAndNamespace[host.Name(defaultGateway)][defaultGatewayNamespace]
 			if !f {
 				continue
 			}
 		}
 		svcKey := svc.Key()
+		log.Infof("[tjk]Found svc %v, svcKey=%s", svc, svcKey)
 		log.Infof("[tjk]len(ports)=%d of service %s", len(ports), servers)
 		for port := range ports {
 			// Start - Updated by Higress
+			log.Infof("[tjk]try to resolve port %d of service %s", port, g)
 			instances := gc.si.ServiceInstancesByPort(svc, port, nil)
 			log.Infof("[tjk]len(instances)=%d of service %s:%d", len(instances), g, port)
 			// End - Updated by Higress
@@ -154,6 +157,8 @@ func (gc GatewayContext) ResolveGatewayInstances(
 						}
 					}
 					if hintPort.Len() > 0 {
+						// add by tjk
+						foundInternal.Insert(fmt.Sprintf("%s:%d", g, hintPort))
 						warnings = append(warnings, fmt.Sprintf(
 							"port %d not found for hostname %q (hint: the service port should be specified, not the workload port. Did you mean one of these ports: %v?)",
 							port, g, sets.SortedList(hintPort)))
