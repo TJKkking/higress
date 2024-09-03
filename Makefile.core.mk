@@ -178,10 +178,15 @@ install: pre-install
 	helm install higress helm/higress -n higress-system --create-namespace --set 'global.local=true'
 
 ENVOY_LATEST_IMAGE_TAG ?= sha-59acb61
-ISTIO_LATEST_IMAGE_TAG ?= sha-59acb61
+ISTIO_LATEST_IMAGE_TAG ?= ea256cf2a8d85ae4cccd8f7a519e02447f44b980
 
 install-gateway-api-crd:
-	kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.0.0/experimental-install.yaml
+	@if ! kubectl get crds | grep -q 'gateways.gateway.networking.k8s.io'; then \
+		echo "Installing Gateway API CRDs..."; \
+		kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.0.0/experimental-install.yaml; \
+	else \
+		echo "Gateway API CRDs already installed, skipping..."; \
+	fi
 
 install-dev: pre-install install-gateway-api-crd
 	helm install higress helm/core -n higress-system --create-namespace --set 'controller.tag=$(TAG)' --set 'gateway.replicas=1' --set 'pilot.tag=$(ISTIO_LATEST_IMAGE_TAG)' --set 'gateway.tag=$(ENVOY_LATEST_IMAGE_TAG)' --set 'global.local=true' --set 'global.enableGatewayAPI-true'
