@@ -15,6 +15,11 @@ description: AI 代理插件配置参考
 
 > 请求路径后缀匹配 `/v1/embeddings` 时，对应文本向量场景，会用 OpenAI 的文本向量协议解析请求 Body，再转换为对应 LLM 厂商的文本向量协议
 
+## 运行属性
+
+插件执行阶段：`默认阶段`
+插件执行优先级：`100`
+
 
 ## 配置字段
 
@@ -134,6 +139,18 @@ Groq 所对应的 `type` 为 `groq`。它并无特有的配置字段。
 
 文心一言所对应的 `type` 为 `baidu`。它并无特有的配置字段。
 
+#### 360智脑
+
+360智脑所对应的 `type` 为 `ai360`。它并无特有的配置字段。
+
+#### GitHub模型
+
+GitHub模型所对应的 `type` 为 `github`。它并无特有的配置字段。
+
+#### Mistral
+
+Mistral 所对应的 `type` 为 `mistral`。它并无特有的配置字段。
+
 #### MiniMax
 
 MiniMax所对应的 `type` 为 `minimax`。它特有的配置字段如下：
@@ -201,6 +218,10 @@ DeepL 所对应的 `type` 为 `deepl`。它特有的配置字段如下：
 | 名称         | 数据类型 | 填写要求 | 默认值 | 描述                         |
 | ------------ | -------- | -------- | ------ | ---------------------------- |
 | `targetLang` | string   | 必填     | -      | DeepL 翻译服务需要的目标语种 |
+
+#### Cohere
+
+Cohere 所对应的 `type` 为 `cohere`。它并无特有的配置字段。
 
 ## 用法示例
 
@@ -318,6 +339,7 @@ provider:
     'gpt-35-turbo': "qwen-plus"
     'gpt-4-turbo': "qwen-max"
     'gpt-4-*': "qwen-max"
+    'gpt-4o': "qwen-vl-plus"
     'text-embedding-v1': 'text-embedding-v1'
     '*': "qwen-turbo"
 ```
@@ -326,7 +348,111 @@ provider:
 
 URL: http://your-domain/v1/chat/completions
 
-请求体：
+请求示例：
+
+```json
+{
+  "model": "gpt-3",
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ],
+  "temperature": 0.3
+}
+```
+
+响应示例：
+
+```json
+{
+  "id": "c2518bd3-0f46-97d1-be34-bb5777cb3108",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "我是通义千问，由阿里云开发的AI助手。我可以回答各种问题、提供信息和与用户进行对话。有什么我可以帮助你的吗？"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1715175072,
+  "model": "qwen-turbo",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 24,
+    "completion_tokens": 33,
+    "total_tokens": 57
+  }
+}
+```
+
+**多模态模型 API 请求示例（适用于 `qwen-vl-plus` 和 `qwen-vl-max` 模型）**
+
+URL: http://your-domain/v1/chat/completions
+
+请求示例：
+
+```json
+{
+    "model": "gpt-4o",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://dashscope.oss-cn-beijing.aliyuncs.com/images/dog_and_girl.jpeg"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "这个图片是哪里？"
+                }
+            ]
+        }
+    ],
+    "temperature": 0.3
+}
+```
+
+响应示例：
+
+```json
+{
+    "id": "17c5955d-af9c-9f28-bbde-293a9c9a3515",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "text": "这张照片显示的是一位女士和一只狗在海滩上。由于我无法获取具体的地理位置信息，所以不能确定这是哪个地方的海滩。但是从视觉内容来看，它可能是一个位于沿海地区的沙滩海岸线，并且有海浪拍打着岸边。这样的场景在全球许多美丽的海滨地区都可以找到。如果您需要更精确的信息，请提供更多的背景或细节描述。"
+                    }
+                ]
+            },
+            "finish_reason": "stop"
+        }
+    ],
+    "created": 1723949230,
+    "model": "qwen-vl-plus",
+    "object": "chat.completion",
+    "usage": {
+        "prompt_tokens": 1279,
+        "completion_tokens": 78
+    }
+}
+```
+
+**文本向量请求示例**
+
+URL: http://your-domain/v1/embeddings
+
+请求示例：
 
 ```json
 {
@@ -335,7 +461,7 @@ URL: http://your-domain/v1/chat/completions
 }
 ```
 
-响应体示例：
+响应示例：
 
 ```json
 {
@@ -363,47 +489,6 @@ URL: http://your-domain/v1/chat/completions
   "usage": {
     "prompt_tokens": 1,
     "total_tokens": 1
-  }
-}
-```
-
-**请求示例**
-
-URL: http://your-domain/v1/embeddings
-
-示例请求内容：
-
-```json
-{
-    "model": "text-embedding-v1",
-    "input": [
-        "Hello world!"
-    ]
-}
-```
-
-示例响应内容：
-
-```json
-{
-  "id": "c2518bd3-0f46-97d1-be34-bb5777cb3108",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "我是通义千问，由阿里云开发的AI助手。我可以回答各种问题、提供信息和与用户进行对话。有什么我可以帮助你的吗？"
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "created": 1715175072,
-  "model": "qwen-turbo",
-  "object": "chat.completion",
-  "usage": {
-    "prompt_tokens": 24,
-    "completion_tokens": 33,
-    "total_tokens": 57
   }
 }
 ```
@@ -523,6 +608,65 @@ provider:
   },
   "request_id": "187e99ba-5b64-9ffe-8f69-01dafbaf6ed7"
 }
+```
+
+### 使用original协议代理百炼智能体应用
+
+**配置信息**
+
+```yaml
+provider:
+  type: qwen
+  apiTokens:
+    - "YOUR_DASHSCOPE_API_TOKEN"
+  protocol: original
+```
+
+**请求实例**
+```json
+{
+  "input": {
+      "prompt": "介绍一下Dubbo"
+  },
+  "parameters":  {},
+  "debug": {}
+}
+```
+
+**响应实例**
+
+```json
+{
+    "output": {
+        "finish_reason": "stop",
+        "session_id": "677e7e8fbb874e1b84792b65042e1599",
+        "text": "Apache Dubbo 是一个..."
+    },
+    "usage": {
+        "models": [
+            {
+                "output_tokens": 449,
+                "model_id": "qwen-max",
+                "input_tokens": 282
+            }
+        ]
+    },
+    "request_id": "b59e45e3-5af4-91df-b7c6-9d746fd3297c"
+}
+```
+
+### 使用 OpenAI 协议代理豆包大模型服务
+
+**配置信息**
+
+```yaml
+provider:
+  type: doubao
+  apiTokens:
+    - YOUR_DOUBAO_API_KEY
+  modelMapping:
+    '*': YOUR_DOUBAO_ENDPOINT
+  timeout: 1200000
 ```
 
 ### 使用月之暗面配合其原生的文件上下文
@@ -693,6 +837,7 @@ provider:
   }
 }
 ```
+
 ### 使用 OpenAI 协议代理混元服务
 
 **配置信息**
@@ -710,9 +855,10 @@ provider:
 ```
 
 **请求示例**
-请求脚本：
-```sh
 
+请求脚本：
+
+```shell
 curl --location 'http://<your higress domain>/v1/chat/completions' \
 --header 'Content-Type:  application/json' \
 --data '{
@@ -873,6 +1019,221 @@ provider:
         "status_code": 0,
         "status_msg": ""
     }
+}
+```
+
+### 使用 OpenAI 协议代理 GitHub 模型服务
+
+**配置信息**
+
+```yaml
+provider:
+  type: github
+  apiTokens:
+    - "YOUR_GITHUB_ACCESS_TOKEN"
+  modelMapping:
+    "gpt-4o": "gpt-4o"
+    "gpt-4": "Phi-3.5-MoE-instruct"
+    "gpt-3.5": "cohere-command-r-08-2024"
+    "text-embedding-3-large": "text-embedding-3-large"
+```
+
+**请求示例**
+
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant."
+    },
+    {
+      "role": "user",
+      "content": "What is the capital of France?"
+    }
+  ],
+  "stream": true,
+  "temperature": 1.0,
+  "top_p": 1.0,
+  "max_tokens": 1000,
+  "model": "gpt-4o"
+}
+```
+
+**响应示例**
+```json
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "logprobs": null,
+      "message": {
+        "content": "The capital of France is Paris.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1728131051,
+  "id": "chatcmpl-AEy7PU2JImdsD1W6Jw8GigZSEnM2u",
+  "model": "gpt-4o-2024-08-06",
+  "object": "chat.completion",
+  "system_fingerprint": "fp_67802d9a6d",
+  "usage": {
+    "completion_tokens": 7,
+    "prompt_tokens": 24,
+    "total_tokens": 31
+  }
+}
+```
+
+**文本向量请求示例**
+
+```json
+{
+  "input": ["first phrase", "second phrase", "third phrase"],
+  "model": "text-embedding-3-large"
+}
+```
+
+响应示例：
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "index": 0,
+      "embedding": [
+        -0.0012583479,
+        0.0020349282,
+        ...
+        0.012051377,
+        -0.0053306012,
+        0.0060688322
+      ]
+    }
+  ],
+  "model": "text-embedding-3-large",
+  "usage": {
+    "prompt_tokens": 6,
+    "total_tokens": 6
+  }
+}
+```
+
+### 使用 OpenAI 协议代理360智脑服务
+
+**配置信息**
+
+```yaml
+provider:
+  type: ai360
+  apiTokens:
+    - "YOUR_360_API_TOKEN"
+  modelMapping:
+    "gpt-4o": "360gpt-turbo-responsibility-8k"
+    "gpt-4": "360gpt2-pro"
+    "gpt-3.5": "360gpt-turbo"
+    "text-embedding-3-small": "embedding_s1_v1.2"
+    "*": "360gpt-pro"
+```
+
+**请求示例**
+
+```json
+{
+  "model": "gpt-4o",
+  "messages": [
+    {
+      "role": "system",
+      "content": "你是一个专业的开发人员！"
+    },
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ]
+}
+```
+
+**响应示例**
+
+```json
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "你好，我是360智脑，一个大型语言模型。我可以帮助回答各种问题、提供信息、进行对话等。有什么可以帮助你的吗？"
+      },
+      "finish_reason": "",
+      "index": 0
+    }
+  ],
+  "created": 1724257207,
+  "id": "5e5c94a2-d989-40b5-9965-5b971db941fe",
+  "model": "360gpt-turbo",
+  "object": "",
+  "usage": {
+    "completion_tokens": 33,
+    "prompt_tokens": 24,
+    "total_tokens": 57
+  },
+  "messages": [
+    {
+      "role": "system",
+      "content": "你是一个专业的开发人员！"
+    },
+    {
+      "role": "user",
+      "content": "你好，你是谁？"
+    }
+  ],
+  "context": null
+}
+```
+
+**文本向量请求示例**
+
+URL: http://your-domain/v1/embeddings
+
+请求示例：
+
+```json
+{
+  "input":["你好"],
+  "model":"text-embedding-3-small"
+}
+```
+
+响应示例：
+
+```json
+{
+  "data": [
+    {
+      "embedding": [
+        -0.011237,
+        -0.015433,
+        ...,
+        -0.028946,
+        -0.052778,
+        0.003768,
+        -0.007917,
+        -0.042201
+      ],
+      "index": 0,
+      "object": ""
+    }
+  ],
+  "model": "embedding_s1_v1.2",
+  "object": "",
+  "usage": {
+    "prompt_tokens": 2,
+    "total_tokens": 2
+  }
 }
 ```
 

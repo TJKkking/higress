@@ -147,7 +147,7 @@ func (w *watcher) Stop() {
 			log.Errorf("Failed to unsubscribe service : %v", serviceName)
 			continue
 		}
-		w.cache.DeleteServiceEntryWrapper(makeHost(serviceName))
+		w.cache.DeleteServiceWrapper(makeHost(serviceName))
 	}
 	w.UpdateService()
 }
@@ -203,17 +203,18 @@ func (w *watcher) subscribe(service *fargo.Application) error {
 			if err != nil {
 				return err
 			}
-			w.cache.UpdateServiceEntryWrapper(makeHost(service.Name), &memory.ServiceEntryWrapper{
+			w.cache.UpdateServiceWrapper(makeHost(service.Name), &memory.ServiceWrapper{
 				ServiceName:  service.Name,
 				ServiceEntry: se,
 				Suffix:       suffix,
 				RegistryType: w.Type,
+				RegistryName: w.Name,
 			})
 			return nil
 		}
 
 		if w.updateCacheWhenEmpty {
-			w.cache.DeleteServiceEntryWrapper(makeHost(service.Name))
+			w.cache.DeleteServiceWrapper(makeHost(service.Name))
 		}
 
 		return nil
@@ -251,7 +252,7 @@ func convertMap(m map[string]interface{}) map[string]string {
 }
 
 func generateServiceEntry(app *fargo.Application) (*v1alpha3.ServiceEntry, error) {
-	portList := make([]*v1alpha3.Port, 0)
+	portList := make([]*v1alpha3.ServicePort, 0)
 	endpoints := make([]*v1alpha3.WorkloadEntry, 0)
 
 	for _, instance := range app.Instances {
@@ -261,7 +262,7 @@ func generateServiceEntry(app *fargo.Application) (*v1alpha3.ServiceEntry, error
 				return nil, fmt.Errorf("unsupported protocol %v", val)
 			}
 		}
-		port := &v1alpha3.Port{
+		port := &v1alpha3.ServicePort{
 			Name:     protocol.String(),
 			Number:   uint32(instance.Port),
 			Protocol: protocol.String(),

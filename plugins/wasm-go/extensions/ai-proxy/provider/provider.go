@@ -5,9 +5,10 @@ import (
 	"math/rand"
 	"strings"
 
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/tidwall/gjson"
+
+	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 )
 
 type ApiName string
@@ -19,6 +20,8 @@ const (
 
 	providerTypeMoonshot   = "moonshot"
 	providerTypeAzure      = "azure"
+	providerTypeAi360      = "ai360"
+	providerTypeGithub     = "github"
 	providerTypeQwen       = "qwen"
 	providerTypeOpenAI     = "openai"
 	providerTypeGroq       = "groq"
@@ -36,6 +39,9 @@ const (
 	providerTypeSpark      = "spark"
 	providerTypeGemini     = "gemini"
 	providerTypeDeepl      = "deepl"
+	providerTypeMistral    = "mistral"
+	providerTypeCohere     = "cohere"
+	providerTypeDoubao     = "doubao"
 
 	protocolOpenAI   = "openai"
 	protocolOriginal = "original"
@@ -73,6 +79,8 @@ var (
 	providerInitializers = map[string]providerInitializer{
 		providerTypeMoonshot:   &moonshotProviderInitializer{},
 		providerTypeAzure:      &azureProviderInitializer{},
+		providerTypeAi360:      &ai360ProviderInitializer{},
+		providerTypeGithub:     &githubProviderInitializer{},
 		providerTypeQwen:       &qwenProviderInitializer{},
 		providerTypeOpenAI:     &openaiProviderInitializer{},
 		providerTypeGroq:       &groqProviderInitializer{},
@@ -90,6 +98,9 @@ var (
 		providerTypeSpark:      &sparkProviderInitializer{},
 		providerTypeGemini:     &geminiProviderInitializer{},
 		providerTypeDeepl:      &deeplProviderInitializer{},
+		providerTypeMistral:    &mistralProviderInitializer{},
+		providerTypeCohere:     &cohereProviderInitializer{},
+		providerTypeDoubao:     &doubaoProviderInitializer{},
 	}
 )
 
@@ -118,7 +129,10 @@ type ResponseBodyHandler interface {
 }
 
 type ProviderConfig struct {
-	// @Title zh-CN AI服务提供商
+	// @Title zh-CN ID
+	// @Description zh-CN AI服务提供商标识
+	id string `required:"true" yaml:"id" json:"id"`
+	// @Title zh-CN 类型
 	// @Description zh-CN AI服务提供商类型
 	typ string `required:"true" yaml:"type" json:"type"`
 	// @Title zh-CN API Tokens
@@ -189,7 +203,20 @@ type ProviderConfig struct {
 	customSettings []CustomSetting
 }
 
+func (c *ProviderConfig) GetId() string {
+	return c.id
+}
+
+func (c *ProviderConfig) GetType() string {
+	return c.typ
+}
+
+func (c *ProviderConfig) GetProtocol() string {
+	return c.protocol
+}
+
 func (c *ProviderConfig) FromJson(json gjson.Result) {
+	c.id = json.Get("id").String()
 	c.typ = json.Get("type").String()
 	c.apiTokens = make([]string, 0)
 	for _, token := range json.Get("apiTokens").Array() {
@@ -235,13 +262,12 @@ func (c *ProviderConfig) FromJson(json gjson.Result) {
 		}
 	}
 	c.targetLang = json.Get("targetLang").String()
-	
+
 	if schemaValue, ok := json.Get("responseJsonSchema").Value().(map[string]interface{}); ok {
 		c.responseJsonSchema = schemaValue
 	} else {
-		c.responseJsonSchema = nil 
+		c.responseJsonSchema = nil
 	}
-	
 
 	c.customSettings = make([]CustomSetting, 0)
 	customSettingsJson := json.Get("customSettings")
@@ -289,6 +315,15 @@ func (c *ProviderConfig) Validate() error {
 	return nil
 }
 
+func (c *ProviderConfig) GetOrSetTokenWithContext(ctx wrapper.HttpContext) string {
+	ctxApiKey := ctx.GetContext(ctxKeyApiName)
+	if ctxApiKey == nil {
+		ctxApiKey = c.GetRandomToken()
+		ctx.SetContext(ctxKeyApiName, ctxApiKey)
+	}
+	return ctxApiKey.(string)
+}
+
 func (c *ProviderConfig) GetRandomToken() string {
 	apiTokens := c.apiTokens
 	count := len(apiTokens)
@@ -300,6 +335,14 @@ func (c *ProviderConfig) GetRandomToken() string {
 	default:
 		return apiTokens[rand.Intn(count)]
 	}
+}
+
+func (c *ProviderConfig) IsOriginal() bool {
+	return c.protocol == protocolOriginal
+}
+
+func (c *ProviderConfig) ReplaceByCustomSettings(body []byte) ([]byte, error) {
+	return ReplaceByCustomSettings(body, c.customSettings)
 }
 
 func CreateProvider(pc ProviderConfig) (Provider, error) {
@@ -345,8 +388,4 @@ func doGetMappedModel(model string, modelMapping map[string]string, log wrapper.
 	}
 
 	return ""
-}
-
-func (c ProviderConfig) ReplaceByCustomSettings(body []byte) ([]byte, error) {
-	return ReplaceByCustomSettings(body, c.customSettings)
 }
