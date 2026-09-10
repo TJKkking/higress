@@ -18,80 +18,84 @@ import (
 	"sync"
 
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/istio/pilot/pkg/model"
-	"istio.io/istio/pilot/pkg/util/sets"
+	istiomodel "istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/util/sets"
+	v1 "k8s.io/api/core/v1"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/alibaba/higress/pkg/ingress/kube/annotations"
-	"github.com/alibaba/higress/pkg/ingress/kube/common"
-	"github.com/alibaba/higress/pkg/ingress/kube/kingress"
-	"github.com/alibaba/higress/pkg/ingress/kube/secret"
-	"github.com/alibaba/higress/pkg/ingress/kube/util"
-	. "github.com/alibaba/higress/pkg/ingress/log"
-	"github.com/alibaba/higress/pkg/kube"
-	"github.com/alibaba/higress/registry/reconcile"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/annotations"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/common"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/kingress"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/secret"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/util"
+	. "github.com/alibaba/higress/v2/pkg/ingress/log"
+	"github.com/alibaba/higress/v2/pkg/kube"
+	"github.com/alibaba/higress/v2/registry/reconcile"
 )
 
 var (
-	_ model.ConfigStoreCache = &KIngressConfig{}
-	_ model.IngressStore     = &KIngressConfig{}
+	_ istiomodel.ConfigStoreController = &KIngressConfig{}
+	_ istiomodel.IngressStore          = &KIngressConfig{}
 )
 
 type KIngressConfig struct {
-	// key: cluster id
-	remoteIngressControllers map[string]common.KIngressController
+	remoteIngressControllers map[cluster.ID]common.KIngressController
 	mutex                    sync.RWMutex
 
-	ingressRouteCache  model.IngressRouteCollection
-	ingressDomainCache model.IngressDomainCollection
+	ingressRouteCache  istiomodel.IngressRouteCollection
+	ingressDomainCache istiomodel.IngressDomainCollection
 
 	localKubeClient        kube.Client
-	virtualServiceHandlers []model.EventHandler
-	gatewayHandlers        []model.EventHandler
-	envoyFilterHandlers    []model.EventHandler
-	WatchErrorHandler      cache.WatchErrorHandler
+	virtualServiceHandlers []istiomodel.EventHandler
+	gatewayHandlers        []istiomodel.EventHandler
+	envoyFilterHandlers    []istiomodel.EventHandler
+	watchErrorHandler      cache.WatchErrorHandler
 
 	cachedEnvoyFilters []config.Config
 
-	watchedSecretSet sets.Set
+	watchedSecretSet sets.Set[string]
 
 	RegistryReconciler *reconcile.Reconciler
 
-	XDSUpdater model.XDSUpdater
+	XDSUpdater istiomodel.XDSUpdater
 
 	annotationHandler annotations.AnnotationHandler
 
+	globalGatewayName string
+
 	namespace string
 
-	clusterId string
+	clusterId cluster.ID
 }
 
-func NewKIngressConfig(localKubeClient kube.Client, XDSUpdater model.XDSUpdater, namespace, clusterId string) *KIngressConfig {
+func NewKIngressConfig(localKubeClient kube.Client, XDSUpdater istiomodel.XDSUpdater, namespace string, options common.Options) *KIngressConfig {
 	if localKubeClient.KIngressInformer() == nil {
 		return nil
 	}
+	clusterId := options.ClusterId
 	if clusterId == "Kubernetes" {
 		clusterId = ""
 	}
 	config := &KIngressConfig{
-		remoteIngressControllers: make(map[string]common.KIngressController),
+		remoteIngressControllers: make(map[cluster.ID]common.KIngressController),
 		localKubeClient:          localKubeClient,
 		XDSUpdater:               XDSUpdater,
 		annotationHandler:        annotations.NewAnnotationHandlerManager(),
 		clusterId:                clusterId,
-		watchedSecretSet:         sets.NewSet(),
+		globalGatewayName:        namespace + "/" + common.CreateConvertedName(clusterId.String(), "global"),
+		watchedSecretSet:         sets.New[string](),
 		namespace:                namespace,
 	}
-
 	return config
 }
 
-func (m *KIngressConfig) RegisterEventHandler(kind config.GroupVersionKind, f model.EventHandler) {
+func (m *KIngressConfig) RegisterEventHandler(kind config.GroupVersionKind, f istiomodel.EventHandler) {
 	IngressLog.Infof("register resource %v", kind)
 	switch kind {
 	case gvk.VirtualService:
@@ -110,7 +114,7 @@ func (m *KIngressConfig) RegisterEventHandler(kind config.GroupVersionKind, f mo
 }
 
 func (m *KIngressConfig) AddLocalCluster(options common.Options) common.KIngressController {
-	secretController := secret.NewController(m.localKubeClient, options.ClusterId)
+	secretController := secret.NewController(m.localKubeClient, options)
 	secretController.AddEventHandler(m.ReflectSecretChanges)
 
 	var ingressController common.KIngressController
@@ -121,24 +125,18 @@ func (m *KIngressConfig) AddLocalCluster(options common.Options) common.KIngress
 	return ingressController
 }
 
-func (m *KIngressConfig) InitializeCluster(ingressController common.KIngressController, stop <-chan struct{}) error {
-	_ = ingressController.SetWatchErrorHandler(m.WatchErrorHandler)
-	go ingressController.Run(stop)
-	return nil
-}
-
-func (m *KIngressConfig) List(typ config.GroupVersionKind, namespace string) ([]config.Config, error) {
+func (m *KIngressConfig) List(typ config.GroupVersionKind, namespace string) []config.Config {
 	if typ == gvk.EnvoyFilter || typ == gvk.DestinationRule || typ == gvk.WasmPlugin || typ == gvk.ServiceEntry {
-		return nil, nil
+		return nil
 	}
 	if typ != gvk.Gateway && typ != gvk.VirtualService {
-		return nil, common.ErrUnsupportedOp
+		return nil
 	}
 
 	// Currently, only support list all namespaces gateways or virtualservices.
 	if namespace != "" {
 		IngressLog.Warnf("ingress store only support type %s of all namespace.", typ)
-		return nil, common.ErrUnsupportedOp
+		return nil
 	}
 
 	var configs []config.Config
@@ -154,19 +152,19 @@ func (m *KIngressConfig) List(typ config.GroupVersionKind, namespace string) ([]
 	IngressLog.Infof("resource type %s, configs number %d", typ, len(wrapperConfigs))
 	switch typ {
 	case gvk.Gateway:
-		return m.convertGateways(wrapperConfigs), nil
+		return m.convertGateways(wrapperConfigs)
 	case gvk.VirtualService:
-		return m.convertVirtualService(wrapperConfigs), nil
+		return m.convertVirtualService(wrapperConfigs)
 	}
-	return nil, nil
+	return nil
 }
 
 func (m *KIngressConfig) createWrapperConfigs(configs []config.Config) []common.WrapperConfig {
 	var wrapperConfigs []common.WrapperConfig
 
 	// Init global context
-	clusterSecretListers := map[string]listersv1.SecretLister{}
-	clusterServiceListers := map[string]listersv1.ServiceLister{}
+	clusterSecretListers := map[cluster.ID]listersv1.SecretLister{}
+	clusterServiceListers := map[cluster.ID]listersv1.ServiceLister{}
 	m.mutex.RLock()
 	for clusterId, controller := range m.remoteIngressControllers {
 		clusterSecretListers[clusterId] = controller.SecretLister()
@@ -174,7 +172,7 @@ func (m *KIngressConfig) createWrapperConfigs(configs []config.Config) []common.
 	}
 	m.mutex.RUnlock()
 	globalContext := &annotations.GlobalContext{
-		WatchedSecrets:      sets.NewSet(),
+		WatchedSecrets:      sets.New[string](),
 		ClusterSecretLister: clusterSecretListers,
 		ClusterServiceList:  clusterServiceListers,
 	}
@@ -240,7 +238,7 @@ func (m *KIngressConfig) convertGateways(configs []common.WrapperConfig) []confi
 				Name:             common.CreateConvertedName(constants.IstioIngressGatewayName, cleanHost),
 				Namespace:        m.namespace,
 				Annotations: map[string]string{
-					common.ClusterIdAnnotation: gateway.ClusterId,
+					common.ClusterIdAnnotation: gateway.ClusterId.String(),
 					common.HostAnnotation:      gateway.Host,
 				},
 			},
@@ -311,9 +309,11 @@ func (m *KIngressConfig) convertVirtualService(configs []common.WrapperConfig) [
 
 		cleanHost := common.CleanHost(host)
 		// namespace/name, name format: (istio cluster id)-host
-		gateways := []string{m.namespace + "/" +
-			common.CreateConvertedName(m.clusterId, cleanHost),
-			common.CreateConvertedName(constants.IstioIngressGatewayName, cleanHost)}
+		gateways := []string{
+			m.namespace + "/" +
+				common.CreateConvertedName(m.clusterId.String(), cleanHost),
+			common.CreateConvertedName(constants.IstioIngressGatewayName, cleanHost),
+		}
 
 		wrapperVS, exist := convertOptions.VirtualServices[host]
 		if !exist {
@@ -333,7 +333,7 @@ func (m *KIngressConfig) convertVirtualService(configs []common.WrapperConfig) [
 				Name:             common.CreateConvertedName(constants.IstioIngressGatewayName, firstRoute.WrapperConfig.Config.Namespace, firstRoute.WrapperConfig.Config.Name, cleanHost),
 				Namespace:        m.namespace,
 				Annotations: map[string]string{
-					common.ClusterIdAnnotation: firstRoute.ClusterId,
+					common.ClusterIdAnnotation: firstRoute.ClusterId.String(),
 				},
 			},
 			Spec: vs,
@@ -466,15 +466,15 @@ func (m *KIngressConfig) ReflectSecretChanges(clusterNamespacedName util.Cluster
 	m.mutex.RUnlock()
 
 	if hit {
-		push := func(kind config.GroupVersionKind) {
-			m.XDSUpdater.ConfigUpdate(&model.PushRequest{
+		push := func(GVK config.GroupVersionKind) {
+			m.XDSUpdater.ConfigUpdate(&istiomodel.PushRequest{
 				Full: true,
-				ConfigsUpdated: map[model.ConfigKey]struct{}{{
-					Kind:      kind,
+				ConfigsUpdated: map[istiomodel.ConfigKey]struct{}{{
+					Kind:      gvk.MustToKind(GVK),
 					Name:      clusterNamespacedName.Name,
 					Namespace: clusterNamespacedName.Namespace,
 				}: {}},
-				Reason: []model.TriggerReason{"auth-secret-change"},
+				Reason: istiomodel.NewReasonStats("auth-secret-change"),
 			})
 		}
 		push(gvk.VirtualService)
@@ -482,7 +482,12 @@ func (m *KIngressConfig) ReflectSecretChanges(clusterNamespacedName util.Cluster
 	}
 }
 
-func (m *KIngressConfig) Run(stop <-chan struct{}) {}
+func (m *KIngressConfig) Run(stop <-chan struct{}) {
+	for _, remoteIngressController := range m.remoteIngressControllers {
+		_ = remoteIngressController.SetWatchErrorHandler(m.watchErrorHandler)
+		go remoteIngressController.Run(stop)
+	}
+}
 
 func (m *KIngressConfig) HasSynced() bool {
 	IngressLog.Info("In Kingress Synced.")
@@ -490,7 +495,7 @@ func (m *KIngressConfig) HasSynced() bool {
 	defer m.mutex.RUnlock()
 
 	for _, remoteIngressController := range m.remoteIngressControllers {
-		IngressLog.Info("In Kingress Synced.", remoteIngressController)
+		IngressLog.Info("In Kingress Synced.")
 		if !remoteIngressController.HasSynced() {
 			return false
 		}
@@ -500,20 +505,32 @@ func (m *KIngressConfig) HasSynced() bool {
 }
 
 func (m *KIngressConfig) SetWatchErrorHandler(f func(r *cache.Reflector, err error)) error {
-	m.WatchErrorHandler = f
+	m.watchErrorHandler = f
 	return nil
 }
 
-func (m *KIngressConfig) GetIngressRoutes() model.IngressRouteCollection {
+func (m *KIngressConfig) GetIngressRoutes() istiomodel.IngressRouteCollection {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 	return m.ingressRouteCache
 }
 
-func (m *KIngressConfig) GetIngressDomains() model.IngressDomainCollection {
+func (m *KIngressConfig) GetIngressDomains() istiomodel.IngressDomainCollection {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 	return m.ingressDomainCache
+}
+
+func (m *KIngressConfig) CheckIngress(clusterName string) istiomodel.CheckIngressResponse {
+	return istiomodel.CheckIngressResponse{}
+}
+
+func (m *KIngressConfig) Services(clusterName string) ([]*v1.Service, error) {
+	return nil, nil
+}
+
+func (m *KIngressConfig) IngressControllers() map[string]string {
+	return nil
 }
 
 func (m *KIngressConfig) Schemas() collection.Schemas {

@@ -21,15 +21,17 @@ import (
 	"testing"
 	"time"
 
-	"istio.io/istio/pilot/pkg/model"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/common"
+
 	kubeclient "istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/test/util/retry"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/alibaba/higress/pkg/ingress/kube/util"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/util"
 )
 
 const (
@@ -43,7 +45,7 @@ var period = time.Second
 
 func TestController(t *testing.T) {
 	client := kubeclient.NewFakeClient()
-	ctrl := NewController(client, "fake-cluster")
+	ctrl := NewController(client, common.Options{ClusterId: "fake-cluster"})
 
 	stop := make(chan struct{})
 	t.Cleanup(func() {
@@ -95,7 +97,7 @@ func TestController(t *testing.T) {
 		{
 			name: "create secret",
 			do: func() error {
-				_, err := client.CoreV1().Secrets(metav1.NamespaceDefault).Create(context.Background(),
+				_, err := client.Kube().CoreV1().Secrets(metav1.NamespaceDefault).Create(context.Background(),
 					secret, metav1.CreateOptions{})
 				return err
 			},
@@ -111,7 +113,7 @@ func TestController(t *testing.T) {
 					if !kerrors.IsNotFound(err) {
 						return err
 					}
-					getSecret, err = client.CoreV1().Secrets(metav1.NamespaceDefault).Create(context.Background(),
+					getSecret, err = client.Kube().CoreV1().Secrets(metav1.NamespaceDefault).Create(context.Background(),
 						secret, metav1.CreateOptions{})
 					if err != nil {
 						return err
@@ -119,7 +121,7 @@ func TestController(t *testing.T) {
 				}
 				// update secret
 				getSecret.Data[secretFakeKey] = []byte(secretUpdatedValue)
-				_, err = client.CoreV1().Secrets(metav1.NamespaceDefault).Update(context.Background(),
+				_, err = client.Kube().CoreV1().Secrets(metav1.NamespaceDefault).Update(context.Background(),
 					getSecret, metav1.UpdateOptions{})
 				return err
 			},
@@ -136,7 +138,7 @@ func TestController(t *testing.T) {
 			// controller Run() with setting period time to 1s.
 			time.Sleep(period)
 
-			secretFullName := model.NamespacedName{
+			secretFullName := types.NamespacedName{
 				Namespace: metav1.NamespaceDefault,
 				Name:      secretFakeName,
 			}.String()

@@ -15,16 +15,15 @@
 package bootstrap
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"time"
 
-	"github.com/alibaba/higress/pkg/cert"
-	"github.com/alibaba/higress/pkg/ingress/kube/common"
-	"github.com/alibaba/higress/pkg/ingress/mcp"
-	"github.com/alibaba/higress/pkg/ingress/translation"
-	higresskube "github.com/alibaba/higress/pkg/kube"
+	"istio.io/istio/pkg/config/mesh/meshwatcher"
+	"istio.io/istio/pkg/kube/krt"
+
 	prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -39,18 +38,23 @@ import (
 	"istio.io/istio/pilot/pkg/xds"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
-	"istio.io/istio/pkg/config/mesh"
+	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/keepalive"
 	istiokube "istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/security"
 	"istio.io/istio/security/pkg/server/ca/authenticate"
 	"istio.io/istio/security/pkg/server/ca/authenticate/kubeauth"
-	"istio.io/pkg/env"
-	"istio.io/pkg/ledger"
-	"istio.io/pkg/log"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/alibaba/higress/v2/pkg/cert"
+	higressconfig "github.com/alibaba/higress/v2/pkg/config"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/common"
+	"github.com/alibaba/higress/v2/pkg/ingress/mcp"
+	"github.com/alibaba/higress/v2/pkg/ingress/translation"
+	higresskube "github.com/alibaba/higress/v2/pkg/kube"
 )
 
 type XdsOptions struct {
@@ -63,6 +67,10 @@ type XdsOptions struct {
 	DebounceMax time.Duration
 	// EnableEDSDebounce indicates whether EDS pushes should be debounced.
 	EnableEDSDebounce bool
+	// KeepConfigLabels indicates whether to keep all the labels when converting configs to xDS resources.
+	KeepConfigLabels bool
+	// KeepConfigAnnotations indicates whether to keep all the annotations when converting configs to xDS resources.
+	KeepConfigAnnotations bool
 }
 
 // RegistryOptions provide configuration options for the configuration controller. If FileDir is set, that directory will
@@ -103,6 +111,7 @@ type ServerArgs struct {
 	// 2. When the ingress class is set empty, the higress controller will watch all ingress
 	// resources in the k8s cluster.
 	IngressClass         string
+	GatewayClass         string
 	EnableStatus         bool
 	WatchNamespace       string
 	GrpcKeepAliveOptions *keepalive.Options
@@ -127,10 +136,11 @@ type ServerInterface interface {
 
 type Server struct {
 	*ServerArgs
+
 	environment      *model.Environment
 	kubeClient       higresskube.Client
-	configController model.ConfigStoreCache
-	configStores     []model.ConfigStoreCache
+	configController model.ConfigStoreController
+	configStores     []model.ConfigStoreController
 	httpServer       *http.Server
 	httpMux          *http.ServeMux
 	grpcServer       *grpc.Server
@@ -140,19 +150,10 @@ type Server struct {
 	certServer       *cert.Server
 }
 
-var (
-	PodNamespace = env.RegisterStringVar("POD_NAMESPACE", "higress-system", "").Get()
-	PodName      = env.RegisterStringVar("POD_NAME", "", "").Get()
-)
-
 func NewServer(args *ServerArgs) (*Server, error) {
-	e := &model.Environment{
-		PushContext:  model.NewPushContext(),
-		DomainSuffix: constants.DefaultKubernetesDomain,
-		MCPMode:      true,
-	}
-	e.SetLedger(buildLedger(args.RegistryOptions))
-
+	e := model.NewEnvironment()
+	e.DomainSuffix = constants.DefaultClusterLocalDomain
+	//e.SetLedger(buildLedger(args.RegistryOptions))
 	ac := aggregate.NewController(aggregate.Options{
 		MeshHolder: e,
 	})
@@ -164,7 +165,7 @@ func NewServer(args *ServerArgs) (*Server, error) {
 		readinessProbes: make(map[string]readinessProbe),
 		server:          server.New(),
 	}
-	s.environment.Watcher = mesh.NewFixedWatcher(&v1alpha1.MeshConfig{})
+	s.environment.Watcher = meshwatcher.NewTestWatcher(&v1alpha1.MeshConfig{})
 	s.environment.Init()
 	initFuncList := []func() error{
 		s.initKubeClient,
@@ -182,7 +183,7 @@ func NewServer(args *ServerArgs) (*Server, error) {
 		}
 	}
 
-	s.server.RunComponent(func(stop <-chan struct{}) error {
+	s.server.RunComponent("kube-client", func(stop <-chan struct{}) error {
 		s.kubeClient.RunAndWait(stop)
 		return nil
 	})
@@ -202,30 +203,31 @@ func (s *Server) initRegistryEventHandlers() error {
 		pushReq := &model.PushRequest{
 			Full: true,
 			ConfigsUpdated: map[model.ConfigKey]struct{}{{
-				Kind:      curr.GroupVersionKind,
+				Kind:      gvk.MustToKind(curr.GroupVersionKind),
 				Name:      curr.Name,
 				Namespace: curr.Namespace,
 			}: {}},
-			Reason: []model.TriggerReason{model.ConfigUpdate},
+			Reason: model.NewReasonStats(model.ConfigUpdate),
 		}
 		s.xdsServer.ConfigUpdate(pushReq)
 	}
 	schemas := common.IngressIR.All()
 	for _, schema := range schemas {
-		s.configController.RegisterEventHandler(schema.Resource().GroupVersionKind(), configHandler)
+		s.configController.RegisterEventHandler(schema.GroupVersionKind(), configHandler)
 	}
 	return nil
 }
 
 func (s *Server) initConfigController() error {
-	ns := PodNamespace
+	ns := higressconfig.PodNamespace
 	options := common.Options{
 		Enable:               true,
-		ClusterId:            string(s.RegistryOptions.KubeOptions.ClusterID),
+		ClusterId:            s.RegistryOptions.KubeOptions.ClusterID,
 		IngressClass:         s.IngressClass,
+		GatewayClass:         s.GatewayClass,
 		WatchNamespace:       s.WatchNamespace,
 		EnableStatus:         s.EnableStatus,
-		SystemNamespace:      ns,
+		SystemNamespace:      higressconfig.PodNamespace,
 		GatewaySelectorKey:   s.GatewaySelectorKey,
 		GatewaySelectorValue: s.GatewaySelectorValue,
 		GatewayHttpPort:      s.GatewayHttpPort,
@@ -235,8 +237,8 @@ func (s *Server) initConfigController() error {
 		options.ClusterId = ""
 	}
 
-	ingressConfig := translation.NewIngressTranslation(s.kubeClient, s.xdsServer, ns, options.ClusterId)
-	ingressController, kingressController := ingressConfig.AddLocalCluster(options)
+	ingressConfig := translation.NewIngressTranslation(s.kubeClient, s.xdsServer, ns, options)
+	ingressConfig.AddLocalCluster(options)
 
 	s.configStores = append(s.configStores, ingressConfig)
 
@@ -248,15 +250,12 @@ func (s *Server) initConfigController() error {
 	s.configController = aggregateConfigController
 
 	// Create the config store.
-	s.environment.IstioConfigStore = model.MakeIstioStore(s.configController)
+	s.environment.ConfigStore = aggregateConfigController
 
-	s.environment.IngressStore = ingressConfig
+	// s.environment.IngressStore = ingressConfig
 
 	// Defer starting the controller until after the service is created.
-	s.server.RunComponent(func(stop <-chan struct{}) error {
-		if err := ingressConfig.InitializeCluster(ingressController, kingressController, stop); err != nil {
-			return err
-		}
+	s.server.RunComponent("config-controller", func(stop <-chan struct{}) error {
 		go s.configController.Run(stop)
 		return nil
 	})
@@ -264,6 +263,46 @@ func (s *Server) initConfigController() error {
 }
 
 func (s *Server) Start(stop <-chan struct{}) error {
+	// Check CRD versions before starting the server.
+	//
+	// The check is bounded by a timeout and is also cancelled when the server
+	// is asked to stop, so a stalled API server cannot block startup or shield
+	// the process from the stop signal. This is a diagnostic warning check, so
+	// a cancelled/expired context surfaces as a warning rather than a failure.
+	const crdVersionCheckTimeout = 30 * time.Second
+	crdCheckCtx, crdCheckCancel := context.WithTimeout(context.Background(), crdVersionCheckTimeout)
+	defer crdCheckCancel()
+	go func() {
+		select {
+		case <-stop:
+			crdCheckCancel()
+		case <-crdCheckCtx.Done():
+		}
+	}()
+
+	log.Info("Checking CRD versions...")
+	crdWarnings := higresskube.CheckCRDVersions(crdCheckCtx, s.kubeClient.RESTConfig())
+	if len(crdWarnings) > 0 {
+		log.Warn("=================================================================")
+		log.Warn("                      CRD VERSION WARNINGS                       ")
+		log.Warn("=================================================================")
+		for i, warning := range crdWarnings {
+			log.Warnf("[%d] %s", i+1, warning)
+		}
+		log.Warn("=================================================================")
+		log.Warn("⚠️  Some features may not work correctly with outdated CRDs.")
+		log.Warn("")
+		log.Warn("Apply the CRDs that match this Higress version:")
+		log.Warn("  # From the same source tree or release bundle used for this build:")
+		log.Warn("  kubectl apply -f api/kubernetes/customresourcedefinitions.gen.yaml")
+		log.Warn("")
+		log.Warn("  # Or from the local Helm chart copy:")
+		log.Warn("  kubectl apply -f helm/core/crds/customresourcedefinitions.gen.yaml")
+		log.Warn("=================================================================")
+	} else {
+		log.Info("✅ All required CRDs are up-to-date")
+	}
+
 	if err := s.server.Start(stop); err != nil {
 		return err
 	}
@@ -343,17 +382,24 @@ func (s *Server) WaitUntilCompletion() {
 
 func (s *Server) initXdsServer() error {
 	log.Info("init xds server")
-	s.xdsServer = xds.NewDiscoveryServer(s.environment, nil, PodName, PodNamespace, s.RegistryOptions.KubeOptions.ClusterAliases)
-	s.xdsServer.McpGenerators[gvk.WasmPlugin.String()] = &mcp.WasmpluginGenerator{Server: s.xdsServer}
-	s.xdsServer.McpGenerators[gvk.DestinationRule.String()] = &mcp.DestinationRuleGenerator{Server: s.xdsServer}
-	s.xdsServer.McpGenerators[gvk.EnvoyFilter.String()] = &mcp.EnvoyFilterGenerator{Server: s.xdsServer}
-	s.xdsServer.McpGenerators[gvk.Gateway.String()] = &mcp.GatewayGenerator{Server: s.xdsServer}
-	s.xdsServer.McpGenerators[gvk.VirtualService.String()] = &mcp.VirtualServiceGenerator{Server: s.xdsServer}
-	s.xdsServer.McpGenerators[gvk.ServiceEntry.String()] = &mcp.ServiceEntryGenerator{Server: s.xdsServer}
-	s.xdsServer.ProxyNeedsPush = func(proxy *model.Proxy, req *model.PushRequest) bool {
-		return true
+	s.xdsServer = xds.NewDiscoveryServer(s.environment, s.RegistryOptions.KubeOptions.ClusterAliases, krt.GlobalDebugHandler)
+	generatorOptions := mcp.GeneratorOptions{KeepConfigLabels: s.XdsOptions.KeepConfigLabels, KeepConfigAnnotations: s.XdsOptions.KeepConfigAnnotations}
+	s.xdsServer.Generators[gvk.WasmPlugin.String()] = &mcp.WasmPluginGenerator{Environment: s.environment, Server: s.xdsServer, GeneratorOptions: generatorOptions}
+	s.xdsServer.Generators[gvk.DestinationRule.String()] = &mcp.DestinationRuleGenerator{Environment: s.environment, Server: s.xdsServer, GeneratorOptions: generatorOptions}
+	s.xdsServer.Generators[gvk.EnvoyFilter.String()] = &mcp.EnvoyFilterGenerator{Environment: s.environment, Server: s.xdsServer, GeneratorOptions: generatorOptions}
+	s.xdsServer.Generators[gvk.Gateway.String()] = &mcp.GatewayGenerator{Environment: s.environment, Server: s.xdsServer, GeneratorOptions: generatorOptions}
+	s.xdsServer.Generators[gvk.VirtualService.String()] = &mcp.VirtualServiceGenerator{Environment: s.environment, Server: s.xdsServer, GeneratorOptions: generatorOptions}
+	s.xdsServer.Generators[gvk.ServiceEntry.String()] = &mcp.ServiceEntryGenerator{Environment: s.environment, Server: s.xdsServer, GeneratorOptions: generatorOptions}
+	for _, schema := range collections.Pilot.All() {
+		gvk := schema.GroupVersionKind().String()
+		if _, ok := s.xdsServer.Generators[gvk]; !ok {
+			s.xdsServer.Generators[gvk] = &mcp.FallbackGenerator{Environment: s.environment, Server: s.xdsServer}
+		}
 	}
-	s.server.RunComponent(func(stop <-chan struct{}) error {
+	s.xdsServer.ProxyNeedsPush = func(proxy *model.Proxy, req *model.PushRequest) (*model.PushRequest, bool) {
+		return req, true
+	}
+	s.server.RunComponent("xds-server", func(stop <-chan struct{}) error {
 		log.Infof("Starting ADS server")
 		s.xdsServer.Start(stop)
 		return nil
@@ -378,7 +424,7 @@ func (s *Server) initAuthenticators() error {
 		&authenticate.ClientCertAuthenticator{},
 	}
 	authenticators = append(authenticators,
-		kubeauth.NewKubeJWTAuthenticator(s.environment.Watcher, s.kubeClient, s.RegistryOptions.KubeOptions.ClusterID, nil, features.JwtPolicy))
+		kubeauth.NewKubeJWTAuthenticator(s.environment.Watcher, s.kubeClient.Kube(), s.RegistryOptions.KubeOptions.ClusterID, nil, nil))
 	if features.XDSAuth {
 		s.xdsServer.Authenticators = authenticators
 	}
@@ -387,7 +433,7 @@ func (s *Server) initAuthenticators() error {
 
 func (s *Server) initAutomaticHttps() error {
 	certOption := &cert.Option{
-		Namespace:     PodNamespace,
+		Namespace:     higressconfig.PodNamespace,
 		ServerAddress: s.CertHttpAddress,
 		Email:         s.AutomaticHttpsEmail,
 	}
@@ -417,10 +463,11 @@ func (s *Server) initKubeClient() error {
 	if err != nil {
 		return fmt.Errorf("failed creating kube config: %v", err)
 	}
-	s.kubeClient, err = higresskube.NewClient(istiokube.NewClientConfigForRestConfig(kubeRestConfig))
+	s.kubeClient, err = higresskube.NewClient(istiokube.NewClientConfigForRestConfig(kubeRestConfig), "higress")
 	if err != nil {
 		return fmt.Errorf("failed creating kube client: %v", err)
 	}
+	s.kubeClient = higresskube.EnableCrdWatcher(s.kubeClient)
 	return nil
 }
 
@@ -433,8 +480,15 @@ func (s *Server) initHttpServer() error {
 	}
 	s.xdsServer.AddDebugHandlers(s.httpMux, nil, true, nil)
 	s.httpMux.HandleFunc("/ready", s.readyHandler)
-	s.httpMux.HandleFunc("/registry/watcherStatus", s.registryWatcherStatusHandler)
+	s.httpMux.HandleFunc("/registry/watcherStatus", s.withConditionalAuth(s.registryWatcherStatusHandler))
 	return nil
+}
+
+func (s *Server) withConditionalAuth(handler http.HandlerFunc) http.HandlerFunc {
+	if features.DebugAuth {
+		return s.xdsServer.AllowAuthenticatedOrLocalhost(handler)
+	}
+	return handler
 }
 
 // readyHandler checks whether the http server is ready
@@ -523,12 +577,13 @@ func (s *Server) pushContextReady(expected int64) bool {
 	return true
 }
 
-func buildLedger(ca RegistryOptions) ledger.Ledger {
-	var result ledger.Ledger
-	if ca.DistributionTrackingEnabled {
-		result = ledger.Make(ca.DistributionCacheRetention)
-	} else {
-		result = &model.DisabledLedger{}
-	}
-	return result
-}
+// ledger has been removed in istio 1.27
+//func buildLedger(ca RegistryOptions) ledger.Ledger {
+//	var result ledger.Ledger
+//	if ca.DistributionTrackingEnabled {
+//		result = ledger.Make(ca.DistributionCacheRetention)
+//	} else {
+//		result = &pkgcommon.DisabledLedger{}
+//	}
+//	return result
+//}

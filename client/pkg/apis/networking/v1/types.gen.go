@@ -17,12 +17,12 @@
 package v1
 
 import (
-	networkingv1 "github.com/alibaba/higress/api/networking/v1"
+	networkingv1 "github.com/alibaba/higress/v2/api/networking/v1"
 	v1alpha1 "istio.io/api/meta/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// please upgrade the proto package
+//
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // <!-- crd generation tags
@@ -61,10 +61,10 @@ type Http2RpcList struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional
 	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
-	Items           []Http2Rpc `json:"items" protobuf:"bytes,2,rep,name=items"`
+	Items           []*Http2Rpc `json:"items" protobuf:"bytes,2,rep,name=items"`
 }
 
-// please upgrade the proto package
+//
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // <!-- crd generation tags
@@ -103,5 +103,5 @@ type McpBridgeList struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional
 	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
-	Items           []McpBridge `json:"items" protobuf:"bytes,2,rep,name=items"`
+	Items           []*McpBridge `json:"items" protobuf:"bytes,2,rep,name=items"`
 }

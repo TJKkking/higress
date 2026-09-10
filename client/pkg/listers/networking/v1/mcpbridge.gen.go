@@ -17,15 +17,17 @@
 package v1
 
 import (
-	v1 "github.com/alibaba/higress/client/pkg/apis/networking/v1"
+	v1 "github.com/alibaba/higress/v2/client/pkg/apis/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 )
 
 // McpBridgeLister helps list McpBridges.
+// All objects returned here must be treated as read-only.
 type McpBridgeLister interface {
 	// List lists all McpBridges in the indexer.
+	// Objects returned here must be treated as read-only.
 	List(selector labels.Selector) (ret []*v1.McpBridge, err error)
 	// McpBridges returns an object that can list and get McpBridges.
 	McpBridges(namespace string) McpBridgeNamespaceLister
@@ -56,10 +58,13 @@ func (s *mcpBridgeLister) McpBridges(namespace string) McpBridgeNamespaceLister 
 }
 
 // McpBridgeNamespaceLister helps list and get McpBridges.
+// All objects returned here must be treated as read-only.
 type McpBridgeNamespaceLister interface {
 	// List lists all McpBridges in the indexer for a given namespace.
+	// Objects returned here must be treated as read-only.
 	List(selector labels.Selector) (ret []*v1.McpBridge, err error)
 	// Get retrieves the McpBridge from the indexer for a given namespace and name.
+	// Objects returned here must be treated as read-only.
 	Get(name string) (*v1.McpBridge, error)
 	McpBridgeNamespaceListerExpansion
 }

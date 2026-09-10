@@ -16,16 +16,16 @@ package cmd
 
 import (
 	"fmt"
-	"time"
 
-	"github.com/alibaba/higress/pkg/bootstrap"
-	innerconstants "github.com/alibaba/higress/pkg/config/constants"
+	"github.com/alibaba/higress/v2/pkg/bootstrap"
+	innerconstants "github.com/alibaba/higress/v2/pkg/config/constants"
 	"github.com/spf13/cobra"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pkg/cmd"
 	"istio.io/istio/pkg/config/constants"
+	"istio.io/istio/pkg/env"
 	"istio.io/istio/pkg/keepalive"
-	"istio.io/pkg/log"
+	"istio.io/istio/pkg/log"
 )
 
 var (
@@ -39,6 +39,20 @@ var (
 	waitForMonitorSignal = func(stop chan struct{}) {
 		cmd.WaitSignal(stop)
 	}
+
+	keepConfigLabels = env.Register(
+		"CONTROLLER_KEEP_XDS_CONFIG_LABELS",
+		true,
+		"If enabled, Higress Controller will keep all the labels when converting configs to xDS resources."+
+			" By default this is enabled. So far, this feature only works for Gateway resource.",
+	).Get()
+
+	keepConfigAnnotations = env.Register(
+		"CONTROLLER_KEEP_XDS_CONFIG_ANNOTATIONS",
+		true,
+		"If enabled, Higress Controller will keep the annotations when converting configs to xDS resources."+
+			" By default this is enabled. So far, this feature only works for Gateway resource.",
+	).Get()
 )
 
 // getServerCommand returns the server cobra command to be executed.
@@ -80,9 +94,11 @@ func getServerCommand() *cobra.Command {
 		GrpcAddress:          ":15051",
 		GrpcKeepAliveOptions: keepalive.DefaultOption(),
 		XdsOptions: bootstrap.XdsOptions{
-			DebounceAfter:     features.DebounceAfter,
-			DebounceMax:       features.DebounceMax,
-			EnableEDSDebounce: features.EnableEDSDebounce,
+			DebounceAfter:         features.DebounceAfter,
+			DebounceMax:           features.DebounceMax,
+			EnableEDSDebounce:     features.EnableEDSDebounce,
+			KeepConfigLabels:      keepConfigLabels,
+			KeepConfigAnnotations: keepConfigAnnotations,
 		},
 	}
 
@@ -90,6 +106,7 @@ func getServerCommand() *cobra.Command {
 	serveCmd.PersistentFlags().StringVar(&serverArgs.GatewaySelectorValue, "gatewaySelectorValue", "higress-system-higress-gateway", "gateway resource selector label value")
 	serveCmd.PersistentFlags().BoolVar(&serverArgs.EnableStatus, "enableStatus", true, "enable the ingress status syncer which use to update the ip in ingress's status")
 	serveCmd.PersistentFlags().StringVar(&serverArgs.IngressClass, "ingressClass", innerconstants.DefaultIngressClass, "if not empty, only watch the ingresses have the specified class, otherwise watch all ingresses")
+	serveCmd.PersistentFlags().StringVar(&serverArgs.GatewayClass, "gatewayClass", innerconstants.DefaultGatewayClass, "if not empty, only process Gateway API resources that belong to the specified GatewayClass")
 	serveCmd.PersistentFlags().StringVar(&serverArgs.WatchNamespace, "watchNamespace", "", "if not empty, only wath the ingresses in the specified namespace, otherwise watch in all namespacees")
 	serveCmd.PersistentFlags().BoolVar(&serverArgs.Debug, "debug", serverArgs.Debug, "if true, enables more debug http api")
 	serveCmd.PersistentFlags().StringVar(&serverArgs.HttpAddress, "httpAddress", serverArgs.HttpAddress, "the http address")
@@ -100,9 +117,7 @@ func getServerCommand() *cobra.Command {
 	serveCmd.PersistentFlags().StringVar(&serverArgs.RegistryOptions.KubeConfig, "kubeconfig", "",
 		"Use a Kubernetes configuration file instead of in-cluster configuration")
 	// RegistryOptions Controller options
-	serveCmd.PersistentFlags().DurationVar(&serverArgs.RegistryOptions.KubeOptions.ResyncPeriod, "resync", 60*time.Second,
-		"Controller resync interval")
-	serveCmd.PersistentFlags().StringVar(&serverArgs.RegistryOptions.KubeOptions.DomainSuffix, "domain", constants.DefaultKubernetesDomain,
+	serveCmd.PersistentFlags().StringVar(&serverArgs.RegistryOptions.KubeOptions.DomainSuffix, "domain", constants.DefaultClusterLocalDomain,
 		"DNS domain suffix")
 	serveCmd.PersistentFlags().StringVar((*string)(&serverArgs.RegistryOptions.KubeOptions.ClusterID), "clusterID", "Kubernetes",
 		"The ID of the cluster that this instance resides")

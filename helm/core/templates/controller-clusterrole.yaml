@@ -26,12 +26,28 @@ rules:
     verbs: ["create", "get", "list", "watch", "update"]
 
   # Use for Kubernetes Service APIs
-  - apiGroups: ["networking.x-k8s.io", "gateway.networking.k8s.io"]
+  - apiGroups: ["networking.x-k8s.io"]
     resources: ["*"]
     verbs: ["get", "watch", "list"]
-  - apiGroups: ["networking.x-k8s.io", "gateway.networking.k8s.io"]
+  - apiGroups: ["networking.x-k8s.io"]
     resources: ["*"] # TODO: should be on just */status but wildcard is not supported
     verbs: ["update"]
+
+  # Gateway api controller
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "watch", "list", "create", "update", "delete", "patch"]
+  - apiGroups: ["gateway.networking.x-k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "watch", "list", "create", "update", "delete", "patch"]
+
+  # Gateway api inference extension
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "watch", "list", "create", "update", "delete", "patch"]
+  - apiGroups: ["inference.networking.x-k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "watch", "list", "create", "update", "delete", "patch"]
 
   # Needed for multicluster secret reading, possibly ingress certs in the future
   - apiGroups: [""]
@@ -124,3 +140,20 @@ rules:
   - apiGroups: ["networking.internal.knative.dev"]
     resources: ["ingresses/status"]
     verbs: ["get","patch","update"]
+  # gateway api need
+  - apiGroups: ["apps"]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "deployments" ]
+  - apiGroups: ["autoscaling"]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "horizontalpodautoscalers" ]
+  - apiGroups: ["policy"]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "poddisruptionbudgets" ]
+  - apiGroups: [""]
+    verbs: [ "get", "watch", "list", "update", "patch", "create", "delete" ]
+    resources: [ "serviceaccounts"]
+  # istio leader election need
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "update", "patch", "create"]

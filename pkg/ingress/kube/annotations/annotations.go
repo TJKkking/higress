@@ -18,24 +18,29 @@ import (
 	"strings"
 
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/istio/pilot/pkg/util/sets"
+	"istio.io/istio/pkg/cluster"
+	"istio.io/istio/pkg/util/sets"
 	listersv1 "k8s.io/client-go/listers/core/v1"
+
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/mcpserver"
 )
 
 type GlobalContext struct {
 	// secret key is cluster/namespace/name
-	WatchedSecrets sets.Set
+	WatchedSecrets sets.Set[string]
 
-	ClusterSecretLister map[string]listersv1.SecretLister
+	ClusterSecretLister map[cluster.ID]listersv1.SecretLister
 
-	ClusterServiceList map[string]listersv1.ServiceLister
+	ClusterServiceList map[cluster.ID]listersv1.ServiceLister
+
+	McpServers []*mcpserver.McpServer
 }
 
 type Meta struct {
 	Namespace    string
 	Name         string
 	RawClusterId string
-	ClusterId    string
+	ClusterId    cluster.ID
 }
 
 // Ingress defines the valid annotations present in one NGINX Ingress.
@@ -52,6 +57,8 @@ type Ingress struct {
 
 	DownstreamTLS *DownstreamTLSConfig
 
+	SSLPassthrough *SSLPassthroughConfig
+
 	Canary *CanaryConfig
 
 	IPAccessControl *IPAccessControlConfig
@@ -67,6 +74,8 @@ type Ingress struct {
 	Fallback *FallbackConfig
 
 	Auth *AuthConfig
+
+	Mirror *MirrorConfig
 
 	Destination *DestinationConfig
 
@@ -108,6 +117,10 @@ func (i *Ingress) IsCanary() bool {
 	return i.Canary.Enabled
 }
 
+func (i *Ingress) IsSSLPassthrough() bool {
+	return i.SSLPassthrough != nil && i.SSLPassthrough.Enabled
+}
+
 // CanaryKind return byHeader, byWeight
 func (i *Ingress) CanaryKind() (bool, bool) {
 	if !i.IsCanary() {
@@ -125,7 +138,8 @@ func (i *Ingress) CanaryKind() (bool, bool) {
 
 func (i *Ingress) NeedTrafficPolicy() bool {
 	return i.UpstreamTLS != nil ||
-		i.LoadBalance != nil
+		i.LoadBalance != nil ||
+		i.Destination.HasBackendProtocols()
 }
 
 type AnnotationHandler interface {
@@ -150,6 +164,7 @@ func NewAnnotationHandlerManager() AnnotationHandler {
 			canary{},
 			cors{},
 			downstreamTLS{},
+			sslPassthrough{},
 			redirect{},
 			rewrite{},
 			upstreamTLS{},
@@ -160,11 +175,13 @@ func NewAnnotationHandlerManager() AnnotationHandler {
 			localRateLimit{},
 			fallback{},
 			auth{},
+			mirror{},
 			destination{},
 			ignoreCaseMatching{},
 			match{},
 			headerControl{},
 			http2rpc{},
+			mcpServer{},
 		},
 		gatewayHandlers: []GatewayHandler{
 			downstreamTLS{},
@@ -181,6 +198,7 @@ func NewAnnotationHandlerManager() AnnotationHandler {
 			retry{},
 			localRateLimit{},
 			fallback{},
+			mirror{},
 			ignoreCaseMatching{},
 			match{},
 			headerControl{},

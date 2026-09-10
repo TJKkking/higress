@@ -18,7 +18,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-
+	"github.com/google/go-cmp/cmp/cmpopts"
 	networking "istio.io/api/networking/v1alpha3"
 )
 
@@ -117,13 +117,47 @@ func TestDestinationParse(t *testing.T) {
 				WeightSum: 100,
 			},
 		},
+		{
+			input: Annotations{
+				buildHigressAnnotationKey(destinationKey): "50% http://plain.example.com:80\n50% https://secure.example.com:443",
+			},
+			expect: &DestinationConfig{
+				McpDestination: []*networking.HTTPRouteDestination{
+					{
+						Destination: &networking.Destination{
+							Host: "plain.example.com",
+							Port: &networking.PortSelector{Number: 80},
+						},
+						Weight: 50,
+					},
+					{
+						Destination: &networking.Destination{
+							Host: "secure.example.com",
+							Port: &networking.PortSelector{Number: 443},
+						},
+						Weight: 50,
+					},
+				},
+				WeightSum: 100,
+				Protocols: map[string]string{
+					"plain.example.com:80":   "HTTP",
+					"secure.example.com:443": "HTTPS",
+				},
+			},
+		},
+	}
+
+	unexportedIgnoredTypes := []interface{}{
+		networking.HTTPRouteDestination{},
+		networking.Destination{},
+		networking.PortSelector{},
 	}
 
 	for _, testCase := range testCases {
 		t.Run("", func(t *testing.T) {
 			config := &Ingress{}
 			_ = parser.Parse(testCase.input, config, nil)
-			if diff := cmp.Diff(config.Destination, testCase.expect); diff != "" {
+			if diff := cmp.Diff(config.Destination, testCase.expect, cmpopts.IgnoreUnexported(unexportedIgnoredTypes...)); diff != "" {
 				t.Fatalf("TestDestinationParse() mismatch: (-want +got)\n%s", diff)
 			}
 		})

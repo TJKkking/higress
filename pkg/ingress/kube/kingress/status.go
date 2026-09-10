@@ -28,9 +28,9 @@ import (
 	kingressclient "knative.dev/networking/pkg/client/clientset/versioned"
 	kingresslister "knative.dev/networking/pkg/client/listers/networking/v1alpha1"
 
-	common2 "github.com/alibaba/higress/pkg/ingress/kube/common"
-	. "github.com/alibaba/higress/pkg/ingress/log"
-	"github.com/alibaba/higress/pkg/kube"
+	common2 "github.com/alibaba/higress/v2/pkg/ingress/kube/common"
+	. "github.com/alibaba/higress/v2/pkg/ingress/log"
+	"github.com/alibaba/higress/v2/pkg/kube"
 )
 
 // statusSyncer keeps the status IP in each Ingress resource updated
@@ -43,13 +43,15 @@ type statusSyncer struct {
 }
 
 // newStatusSyncer creates a new instance
-func newStatusSyncer(localKubeClient, client kube.Client, controller *controller, namespace string) *statusSyncer {
+func newStatusSyncer(localKubeClient, client kube.Client, controller *controller, namespace string,
+	serviceLister listerv1.ServiceLister,
+) *statusSyncer {
 	return &statusSyncer{
 		client:           client.KIngress(),
 		controller:       controller,
 		watchedNamespace: namespace,
 		ingressLister:    client.KIngressInformer().Networking().V1alpha1().Ingresses().Lister(),
-		serviceLister: localKubeClient.KubeInformer().Core().V1().Services().Lister(),
+		serviceLister:    serviceLister,
 	}
 }
 
@@ -76,7 +78,6 @@ func (s *statusSyncer) runUpdateStatus() error {
 		return err
 	}
 
-	IngressLog.Debugf("found number %d of svc", len(svcList))
 	lbStatusList := common2.GetLbStatusList(svcList)
 	return s.updateStatus(lbStatusList)
 }
@@ -111,7 +112,7 @@ func (s *statusSyncer) updateStatus(status []coreV1.LoadBalancerIngress) error {
 		}
 		ingress.Status.MarkNetworkConfigured()
 		KIngressStatus := transportLoadBalancerIngress(status)
-		if ingress.Status.PublicLoadBalancer == nil || len(ingress.Status.PublicLoadBalancer.Ingress) != len(KIngressStatus) || reflect.DeepEqual(ingress.Status.PublicLoadBalancer.Ingress, KIngressStatus) {
+		if ingress.Status.PublicLoadBalancer == nil || len(ingress.Status.PublicLoadBalancer.Ingress) != len(KIngressStatus) || !reflect.DeepEqual(ingress.Status.PublicLoadBalancer.Ingress, KIngressStatus) {
 			ingress.Status.ObservedGeneration = ingress.Generation
 			ingress.Status.MarkLoadBalancerReady(KIngressStatus, KIngressStatus)
 			IngressLog.Infof("Update Ingress %v/%v within cluster %s status", ingress.Namespace, ingress.Name, s.controller.options.ClusterId)

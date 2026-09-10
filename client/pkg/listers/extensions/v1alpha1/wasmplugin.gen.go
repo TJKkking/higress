@@ -17,15 +17,17 @@
 package v1alpha1
 
 import (
-	v1alpha1 "github.com/alibaba/higress/client/pkg/apis/extensions/v1alpha1"
+	v1alpha1 "github.com/alibaba/higress/v2/client/pkg/apis/extensions/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 )
 
 // WasmPluginLister helps list WasmPlugins.
+// All objects returned here must be treated as read-only.
 type WasmPluginLister interface {
 	// List lists all WasmPlugins in the indexer.
+	// Objects returned here must be treated as read-only.
 	List(selector labels.Selector) (ret []*v1alpha1.WasmPlugin, err error)
 	// WasmPlugins returns an object that can list and get WasmPlugins.
 	WasmPlugins(namespace string) WasmPluginNamespaceLister
@@ -56,10 +58,13 @@ func (s *wasmPluginLister) WasmPlugins(namespace string) WasmPluginNamespaceList
 }
 
 // WasmPluginNamespaceLister helps list and get WasmPlugins.
+// All objects returned here must be treated as read-only.
 type WasmPluginNamespaceLister interface {
 	// List lists all WasmPlugins in the indexer for a given namespace.
+	// Objects returned here must be treated as read-only.
 	List(selector labels.Selector) (ret []*v1alpha1.WasmPlugin, err error)
 	// Get retrieves the WasmPlugin from the indexer for a given namespace and name.
+	// Objects returned here must be treated as read-only.
 	Get(name string) (*v1alpha1.WasmPlugin, error)
 	WasmPluginNamespaceListerExpansion
 }

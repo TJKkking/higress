@@ -5,12 +5,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/corazawaf/coraza/v3"
 	"github.com/corazawaf/coraza/v3/debuglog"
 	ctypes "github.com/corazawaf/coraza/v3/types"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 )
 
@@ -28,10 +29,10 @@ func PluginStart() {
 
 type WafConfig struct {
 	waf coraza.WAF
-	//tx  ctypes.Transaction
+	// tx  ctypes.Transaction
 }
 
-func parseConfig(json gjson.Result, config *WafConfig, log wrapper.Log) error {
+func parseConfig(json gjson.Result, config *WafConfig, log log.Log) error {
 	var secRules []string
 	var value gjson.Result
 	value = json.Get("useCRS")
@@ -68,7 +69,7 @@ func parseConfig(json gjson.Result, config *WafConfig, log wrapper.Log) error {
 	return nil
 }
 
-func onHttpRequestHeaders(ctx wrapper.HttpContext, config WafConfig, log wrapper.Log) types.Action {
+func onHttpRequestHeaders(ctx wrapper.HttpContext, config WafConfig, log log.Log) types.Action {
 	ctx.SetContext("skipwaf", false)
 
 	if ignoreBody() {
@@ -148,12 +149,15 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config WafConfig, log wrapper
 	return types.ActionContinue
 }
 
-func onHttpRequestBody(ctx wrapper.HttpContext, config WafConfig, body []byte, log wrapper.Log) types.Action {
-	if ctx.GetContext("interruptionHandled").(bool) {
+func onHttpRequestBody(ctx wrapper.HttpContext, config WafConfig, body []byte, log log.Log) types.Action {
+	if ctx.GetBoolContext("interruptionHandled", false) {
 		return types.ActionContinue
 	}
 
-	tx := ctx.GetContext("tx").(ctypes.Transaction)
+	tx, ok := ctx.GetContext("tx").(ctypes.Transaction)
+	if !ok {
+		return types.ActionContinue
+	}
 
 	if tx.IsRuleEngineOff() {
 		return types.ActionContinue
@@ -200,16 +204,19 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config WafConfig, body []byte, l
 	return types.ActionContinue
 }
 
-func onHttpResponseHeaders(ctx wrapper.HttpContext, config WafConfig, log wrapper.Log) types.Action {
-	if ctx.GetContext("skipwaf").(bool) {
+func onHttpResponseHeaders(ctx wrapper.HttpContext, config WafConfig, log log.Log) types.Action {
+	if ctx.GetBoolContext("skipwaf", false) {
 		return types.ActionContinue
 	}
 
-	if ctx.GetContext("interruptionHandled").(bool) {
+	if ctx.GetBoolContext("interruptionHandled", false) {
 		return types.ActionContinue
 	}
 
-	tx := ctx.GetContext("tx").(ctypes.Transaction)
+	tx, ok := ctx.GetContext("tx").(ctypes.Transaction)
+	if !ok {
+		return types.ActionContinue
+	}
 
 	if tx.IsRuleEngineOff() {
 		return types.ActionContinue
@@ -217,7 +224,7 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config WafConfig, log wrappe
 
 	// Requests without body won't call OnHttpRequestBody, but there are rules in the request body
 	// phase that still need to be executed. If they haven't been executed yet, now is the time.
-	if !ctx.GetContext("processedRequestBody").(bool) {
+	if !ctx.GetBoolContext("processedRequestBody", false) {
 		ctx.SetContext("processedRequestBody", true)
 		interruption, err := tx.ProcessRequestBody()
 		if err != nil {
@@ -249,7 +256,8 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config WafConfig, log wrappe
 		tx.AddResponseHeader(h[0], h[1])
 	}
 
-	interruption := tx.ProcessResponseHeaders(code, ctx.GetContext("httpProtocol").(string))
+	httpProtocol, _ := ctx.GetContext("httpProtocol").(string)
+	interruption := tx.ProcessResponseHeaders(code, httpProtocol)
 	if interruption != nil {
 		return handleInterruption(ctx, "http_response_headers", interruption, log)
 	}
@@ -257,8 +265,8 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config WafConfig, log wrappe
 	return types.ActionContinue
 }
 
-func onHttpResponseBody(ctx wrapper.HttpContext, config WafConfig, body []byte, log wrapper.Log) types.Action {
-	if ctx.GetContext("interruptionHandled").(bool) {
+func onHttpResponseBody(ctx wrapper.HttpContext, config WafConfig, body []byte, log log.Log) types.Action {
+	if ctx.GetBoolContext("interruptionHandled", false) {
 		// At response body phase, proxy-wasm currently relies on emptying the response body as a way of
 		// interruption the response. See https://github.com/corazawaf/coraza-proxy-wasm/issues/26.
 		// If OnHttpResponseBody is called again and an interruption has already been raised, it means that
@@ -269,7 +277,10 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config WafConfig, body []byte, 
 		return replaceResponseBodyWhenInterrupted(log, replaceResponseBody)
 	}
 
-	tx := ctx.GetContext("tx").(ctypes.Transaction)
+	tx, ok := ctx.GetContext("tx").(ctypes.Transaction)
+	if !ok {
+		return types.ActionContinue
+	}
 
 	if tx.IsRuleEngineOff() {
 		return types.ActionContinue
@@ -318,17 +329,20 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config WafConfig, body []byte, 
 	return types.ActionContinue
 }
 
-func onHttpStreamDone(ctx wrapper.HttpContext, config WafConfig, log wrapper.Log) {
-	if ctx.GetContext("skipwaf").(bool) {
+func onHttpStreamDone(ctx wrapper.HttpContext, config WafConfig, log log.Log) {
+	if ctx.GetBoolContext("skipwaf", false) {
 		return
 	}
 
-	tx := ctx.GetContext("tx").(ctypes.Transaction)
+	tx, ok := ctx.GetContext("tx").(ctypes.Transaction)
+	if !ok {
+		return
+	}
 
 	if !tx.IsRuleEngineOff() {
 		// Responses without body won't call OnHttpResponseBody, but there are rules in the response body
 		// phase that still need to be executed. If they haven't been executed yet, now is the time.
-		if !ctx.GetContext("processedResponseBody").(bool) {
+		if !ctx.GetBoolContext("processedResponseBody", false) {
 			ctx.SetContext("processedResponseBody", true)
 			_, err := tx.ProcessResponseBody()
 			if err != nil {

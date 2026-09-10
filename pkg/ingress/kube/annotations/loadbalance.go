@@ -17,7 +17,7 @@ package annotations
 import (
 	"strings"
 
-	"github.com/gogo/protobuf/types"
+	"github.com/golang/protobuf/ptypes/duration"
 	networking "istio.io/api/networking/v1alpha3"
 )
 
@@ -41,6 +41,9 @@ const (
 
 	defaultAffinityCookieName = "INGRESSCOOKIE"
 	defaultAffinityCookiePath = "/"
+
+	mcpSseStatefulKey        = "mcp-sse-stateful-param-name"
+	defaultMcpSseStatefulKey = "sessionId"
 )
 
 var (
@@ -50,25 +53,27 @@ var (
 	headersMapping = map[string]string{
 		"$request_uri": ":path",
 		"$host":        ":authority",
-		"$remote_addr": "x-envoy-external-address",
 	}
 )
 
 type consistentHashByOther struct {
-	header     string
-	queryParam string
+	header      string
+	queryParam  string
+	useSourceIp bool
 }
 
 type consistentHashByCookie struct {
 	name string
 	path string
-	age  *types.Duration
+	age  *duration.Duration
 }
 
 type LoadBalanceConfig struct {
-	simple networking.LoadBalancerSettings_SimpleLB
-	other  *consistentHashByOther
-	cookie *consistentHashByCookie
+	simple            networking.LoadBalancerSettings_SimpleLB
+	other             *consistentHashByOther
+	cookie            *consistentHashByCookie
+	McpSseStateful    bool
+	McpSseStatefulKey string
 }
 
 type loadBalance struct{}
@@ -89,7 +94,7 @@ func (l loadBalance) Parse(annotations Annotations, config *Ingress, _ *GlobalCo
 		loadBalanceConfig.cookie = &consistentHashByCookie{
 			name: defaultAffinityCookieName,
 			path: defaultAffinityCookiePath,
-			age:  &types.Duration{},
+			age:  &duration.Duration{},
 		}
 		if name, err := annotations.ParseStringASAP(sessionCookieName); err == nil {
 			loadBalanceConfig.cookie.name = name
@@ -98,30 +103,37 @@ func (l loadBalance) Parse(annotations Annotations, config *Ingress, _ *GlobalCo
 			loadBalanceConfig.cookie.path = path
 		}
 		if age, err := annotations.ParseIntASAP(sessionCookieMaxAge); err == nil {
-			loadBalanceConfig.cookie.age = &types.Duration{
+			loadBalanceConfig.cookie.age = &duration.Duration{
 				Seconds: int64(age),
 			}
 		} else if age, err = annotations.ParseIntASAP(sessionCookieExpires); err == nil {
-			loadBalanceConfig.cookie.age = &types.Duration{
+			loadBalanceConfig.cookie.age = &duration.Duration{
 				Seconds: int64(age),
 			}
 		}
 	} else if isOtherAffinity(annotations) {
 		if key, err := annotations.ParseStringASAP(upstreamHashBy); err == nil &&
 			strings.HasPrefix(key, varIndicator) {
-			value, exist := headersMapping[key]
-			if exist {
+			// Special case for $remote_addr: use useSourceIp instead of header mapping
+			if key == "$remote_addr" {
 				loadBalanceConfig.other = &consistentHashByOther{
-					header: value,
+					useSourceIp: true,
 				}
 			} else {
-				if strings.HasPrefix(key, headerIndicator) {
+				value, exist := headersMapping[key]
+				if exist {
 					loadBalanceConfig.other = &consistentHashByOther{
-						header: strings.TrimPrefix(key, headerIndicator),
+						header: value,
 					}
-				} else if strings.HasPrefix(key, queryParamIndicator) {
-					loadBalanceConfig.other = &consistentHashByOther{
-						queryParam: strings.TrimPrefix(key, queryParamIndicator),
+				} else {
+					if strings.HasPrefix(key, headerIndicator) {
+						loadBalanceConfig.other = &consistentHashByOther{
+							header: strings.TrimPrefix(key, headerIndicator),
+						}
+					} else if strings.HasPrefix(key, queryParamIndicator) {
+						loadBalanceConfig.other = &consistentHashByOther{
+							queryParam: strings.TrimPrefix(key, queryParamIndicator),
+						}
 					}
 				}
 			}
@@ -129,7 +141,16 @@ func (l loadBalance) Parse(annotations Annotations, config *Ingress, _ *GlobalCo
 	} else {
 		if lb, err := annotations.ParseStringASAP(loadBalanceAnnotation); err == nil {
 			lb = strings.ToUpper(lb)
-			loadBalanceConfig.simple = networking.LoadBalancerSettings_SimpleLB(networking.LoadBalancerSettings_SimpleLB_value[lb])
+			if lb == "MCP-SSE" {
+				loadBalanceConfig.McpSseStateful = true
+				if key, err := annotations.ParseStringASAP(mcpSseStatefulKey); err == nil {
+					loadBalanceConfig.McpSseStatefulKey = key
+				} else {
+					loadBalanceConfig.McpSseStatefulKey = defaultMcpSseStatefulKey
+				}
+			} else {
+				loadBalanceConfig.simple = networking.LoadBalancerSettings_SimpleLB(networking.LoadBalancerSettings_SimpleLB_value[lb])
+			}
 		}
 	}
 
@@ -160,7 +181,13 @@ func (l loadBalance) ApplyTrafficPolicy(trafficPolicy *networking.TrafficPolicy,
 		}
 	} else if loadBalanceConfig.other != nil {
 		var consistentHash *networking.LoadBalancerSettings_ConsistentHashLB
-		if loadBalanceConfig.other.header != "" {
+		if loadBalanceConfig.other.useSourceIp {
+			consistentHash = &networking.LoadBalancerSettings_ConsistentHashLB{
+				HashKey: &networking.LoadBalancerSettings_ConsistentHashLB_UseSourceIp{
+					UseSourceIp: true,
+				},
+			}
+		} else if loadBalanceConfig.other.header != "" {
 			consistentHash = &networking.LoadBalancerSettings_ConsistentHashLB{
 				HashKey: &networking.LoadBalancerSettings_ConsistentHashLB_HttpHeaderName{
 					HttpHeaderName: loadBalanceConfig.other.header,

@@ -23,13 +23,16 @@ import (
 
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/kube"
 	v1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	"k8s.io/apimachinery/pkg/util/version"
 
-	netv1 "github.com/alibaba/higress/client/pkg/apis/networking/v1"
-	. "github.com/alibaba/higress/pkg/ingress/log"
+	netv1 "github.com/alibaba/higress/v2/client/pkg/apis/networking/v1"
+	. "github.com/alibaba/higress/v2/pkg/ingress/log"
 )
 
 func ValidateBackendResource(resource *v1.TypedLocalObjectReference) bool {
@@ -81,13 +84,24 @@ func NetworkingIngressAvailable(client kube.Client) bool {
 	return runningVersion.AtLeast(version118)
 }
 
-// SortIngressByCreationTime sorts the list of config objects in ascending order by their creation time (if available).
+// SortIngressByCreationTime sorts the list of config objects in ascending
+// order by their creation time (if available). When two objects share the
+// same creation timestamp, ties are broken by namespace first and then by
+// name, both in lexicographic order.
+//
+// Note: this sorter does NOT actively identify canary ingresses. A base
+// ingress sorting before its "<name>-canary-*" variants is merely a
+// lexicographic consequence of the namespace/name ordering, and is only
+// guaranteed when the canary names share the base name as a prefix. Canary
+// ingresses named without that prefix may sort in any order relative to the
+// base, since canary status is determined by annotations rather than by name.
 func SortIngressByCreationTime(configs []config.Config) {
 	sort.Slice(configs, func(i, j int) bool {
 		if configs[i].CreationTimestamp == configs[j].CreationTimestamp {
-			in := configs[i].Name + "." + configs[i].Namespace
-			jn := configs[j].Name + "." + configs[j].Namespace
-			return in < jn
+			if configs[i].Namespace != configs[j].Namespace {
+				return configs[i].Namespace < configs[j].Namespace
+			}
+			return configs[i].Name < configs[j].Name
 		}
 		return configs[i].CreationTimestamp.Before(configs[j].CreationTimestamp)
 	})
@@ -100,18 +114,18 @@ func CreateOrUpdateAnnotations(annotations map[string]string, options Options) m
 		out[key] = value
 	}
 
-	out[ClusterIdAnnotation] = options.ClusterId
+	out[ClusterIdAnnotation] = options.ClusterId.String()
 	out[RawClusterIdAnnotation] = options.RawClusterId
 	return out
 }
 
-func GetClusterId(annotations map[string]string) string {
+func GetClusterId(annotations map[string]string) cluster.ID {
 	if len(annotations) == 0 {
 		return ""
 	}
 
 	if value, exist := annotations[ClusterIdAnnotation]; exist {
-		return value
+		return cluster.ID(value)
 	}
 
 	return ""
@@ -143,17 +157,17 @@ func GetHost(annotations map[string]string) string {
 
 // Istio requires that the name of the gateway must conform to the DNS label.
 // For details, you can view: https://github.com/istio/istio/blob/2d5c40ad5e9cceebe64106005aa38381097da2ba/pkg/config/validation/validation.go#L478
-func convertToDNSLabelValid(input string) string {
+func ConvertToDNSLabelValid(input string) string {
 	hasher := md5.New()
 	hasher.Write([]byte(input))
 	hash := hasher.Sum(nil)
 
-	return hex.EncodeToString(hash)
+	return hex.EncodeToString(hash[4:12])
 }
 
 // CleanHost follow the format of mse-ops for host.
 func CleanHost(host string) string {
-	return convertToDNSLabelValid(host)
+	return ConvertToDNSLabelValid(host)
 }
 
 func CreateConvertedName(items ...string) string {
@@ -173,7 +187,7 @@ func SortHTTPRoutes(routes []*WrapperHTTPRoute) {
 
 	isAllCatch := func(route *WrapperHTTPRoute) bool {
 		if route.OriginPathType == Prefix && route.OriginPath == "/" {
-			if route.HTTPRoute.Match == nil {
+			if len(route.HTTPRoute.Match) == 0 {
 				return true
 			}
 
@@ -210,6 +224,16 @@ func SortHTTPRoutes(routes []*WrapperHTTPRoute) {
 				return in > jn
 			}
 
+			lenI, lenJ := len(routes[i].HTTPRoute.Match), len(routes[j].HTTPRoute.Match)
+			if lenI == 0 && lenJ == 0 {
+				return false
+			}
+			if lenI == 0 {
+				return false
+			}
+			if lenJ == 0 {
+				return true
+			}
 			match1, match2 := routes[i].HTTPRoute.Match[0], routes[j].HTTPRoute.Match[0]
 			// methods
 			if in, jn := len(match1.Method.GetRegex()), len(match2.Method.GetRegex()); in != jn {
@@ -331,9 +355,16 @@ func SplitServiceFQDN(fqdn string) (string, string, bool) {
 
 func ConvertBackendService(routeDestination *networking.HTTPRouteDestination) model.BackendService {
 	parts := strings.Split(routeDestination.Destination.Host, ".")
+	var namespace, name string
+	if len(parts) == 2 || len(parts) > 2 && strings.HasSuffix(routeDestination.Destination.Host, "cluster.local") {
+		name = parts[0]
+		namespace = parts[1]
+	} else {
+		name = routeDestination.Destination.Host
+	}
 	service := model.BackendService{
-		Namespace: parts[1],
-		Name:      parts[0],
+		Namespace: namespace,
+		Name:      name,
 		Weight:    routeDestination.Weight,
 	}
 	if routeDestination.Destination.Port != nil {
@@ -354,6 +385,8 @@ func getLoadBalancerIp(svc *v1.Service) []string {
 			hostName := strings.TrimSuffix(ingress.Hostname, SvcHostNameSuffix)
 			if net.ParseIP(hostName) != nil {
 				out = append(out, hostName)
+			} else {
+				out = append(out, ingress.Hostname)
 			}
 		}
 	}
@@ -379,7 +412,8 @@ func getSvcIpList(svcList []*v1.Service) []string {
 
 func SortLbIngressList(lbi []v1.LoadBalancerIngress) func(int, int) bool {
 	return func(i int, j int) bool {
-		return lbi[i].IP < lbi[j].IP
+		return loadBalancerIngressAddress(lbi[i].IP, lbi[i].Hostname) <
+			loadBalancerIngressAddress(lbi[j].IP, lbi[j].Hostname)
 	}
 }
 
@@ -387,9 +421,64 @@ func GetLbStatusList(svcList []*v1.Service) []v1.LoadBalancerIngress {
 	svcIpList := getSvcIpList(svcList)
 	lbi := make([]v1.LoadBalancerIngress, 0, len(svcIpList))
 	for _, ep := range svcIpList {
-		lbi = append(lbi, v1.LoadBalancerIngress{IP: ep})
+		if net.ParseIP(ep) != nil {
+			lbi = append(lbi, v1.LoadBalancerIngress{IP: ep})
+		} else {
+			lbi = append(lbi, v1.LoadBalancerIngress{Hostname: ep})
+		}
 	}
 
 	sort.SliceStable(lbi, SortLbIngressList(lbi))
 	return lbi
+}
+
+func SortLbIngressListV1(lbi []networkingv1.IngressLoadBalancerIngress) func(int, int) bool {
+	return func(i int, j int) bool {
+		return loadBalancerIngressAddress(lbi[i].IP, lbi[i].Hostname) <
+			loadBalancerIngressAddress(lbi[j].IP, lbi[j].Hostname)
+	}
+}
+
+func GetLbStatusListV1(svcList []*v1.Service) []networkingv1.IngressLoadBalancerIngress {
+	svcIpList := getSvcIpList(svcList)
+	lbi := make([]networkingv1.IngressLoadBalancerIngress, 0, len(svcIpList))
+	for _, ep := range svcIpList {
+		if net.ParseIP(ep) != nil {
+			lbi = append(lbi, networkingv1.IngressLoadBalancerIngress{IP: ep})
+		} else {
+			lbi = append(lbi, networkingv1.IngressLoadBalancerIngress{Hostname: ep})
+		}
+	}
+
+	sort.SliceStable(lbi, SortLbIngressListV1(lbi))
+	return lbi
+}
+
+func SortLbIngressListV1Beta1(lbi []networkingv1beta1.IngressLoadBalancerIngress) func(int, int) bool {
+	return func(i int, j int) bool {
+		return loadBalancerIngressAddress(lbi[i].IP, lbi[i].Hostname) <
+			loadBalancerIngressAddress(lbi[j].IP, lbi[j].Hostname)
+	}
+}
+
+func GetLbStatusListV1Beta1(svcList []*v1.Service) []networkingv1beta1.IngressLoadBalancerIngress {
+	svcIpList := getSvcIpList(svcList)
+	lbi := make([]networkingv1beta1.IngressLoadBalancerIngress, 0, len(svcIpList))
+	for _, ep := range svcIpList {
+		if net.ParseIP(ep) != nil {
+			lbi = append(lbi, networkingv1beta1.IngressLoadBalancerIngress{IP: ep})
+		} else {
+			lbi = append(lbi, networkingv1beta1.IngressLoadBalancerIngress{Hostname: ep})
+		}
+	}
+
+	sort.SliceStable(lbi, SortLbIngressListV1Beta1(lbi))
+	return lbi
+}
+
+func loadBalancerIngressAddress(ip, hostname string) string {
+	if ip != "" {
+		return ip
+	}
+	return hostname
 }

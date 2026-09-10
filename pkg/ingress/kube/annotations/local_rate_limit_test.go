@@ -19,14 +19,14 @@ import (
 	"testing"
 
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/mseingress"
 )
 
 func TestLocalRateLimitParse(t *testing.T) {
 	localRateLimit := localRateLimit{}
 	inputCases := []struct {
-		input  map[string]string
-		expect *localRateLimitConfig
+		input   map[string]string
+		expect  *localRateLimitConfig
+		wantErr bool
 	}{
 		{},
 		{
@@ -62,12 +62,41 @@ func TestLocalRateLimitParse(t *testing.T) {
 				FillInterval:  second,
 			},
 		},
+		{
+			input: map[string]string{
+				buildHigressAnnotationKey(limitRPM): "-1",
+			},
+			wantErr: true,
+		},
+		{
+			input: map[string]string{
+				buildHigressAnnotationKey(limitRPM): "4294967296",
+			},
+			wantErr: true,
+		},
+		{
+			input: map[string]string{
+				buildHigressAnnotationKey(limitRPM):             "4294967295",
+				buildHigressAnnotationKey(limitBurstMultiplier): "2",
+			},
+			wantErr: true,
+		},
+		{
+			input: map[string]string{
+				buildHigressAnnotationKey(limitRPS):             "1",
+				buildHigressAnnotationKey(limitBurstMultiplier): "0",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, inputCase := range inputCases {
 		t.Run("", func(t *testing.T) {
 			config := &Ingress{}
-			_ = localRateLimit.Parse(inputCase.input, config, nil)
+			err := localRateLimit.Parse(inputCase.input, config, nil)
+			if (err != nil) != inputCase.wantErr {
+				t.Fatalf("Parse() error = %v, wantErr %v", err, inputCase.wantErr)
+			}
 			if !reflect.DeepEqual(inputCase.expect, config.localRateLimit) {
 				t.Fatal("Should be equal")
 			}
@@ -99,7 +128,8 @@ func TestLocalRateLimitApplyRoute(t *testing.T) {
 			expect: &networking.HTTPRoute{
 				RouteHTTPFilters: []*networking.HTTPFilter{
 					{
-						Name: mseingress.LocalRateLimit,
+						// TODO: hardcode
+						Name: "local-rate-limit",
 						Filter: &networking.HTTPFilter_LocalRateLimit{
 							LocalRateLimit: &networking.LocalRateLimit{
 								TokenBucket: &networking.TokenBucket{

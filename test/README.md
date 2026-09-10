@@ -17,12 +17,18 @@ Higress e2e tests are mainly focusing on two parts for now:
 
 Higress provides make target to run ingress api conformance tests and wasmplugin tests,
 
-+  API Tests: `make higress-conformance-test`
-+  WasmPlugin Tests: `make higress-wasmplugin-test`
-    + Build ALL GO WasmPlugins for testing: `make higress-wasmplugin-test`
-    + Only build one GO WasmPlugin for testing: `PLUGIN_NAME=request-block make higress-wasmplugin-test`
-    + Only build one CPP WasmPlugin for testing: `PLUGIN_TYPE=CPP PLUGIN_NAME=key_auth make higress-wasmplugin-test`
-    + Only run the specific test, splited by comma `TEST_SHORTNAME=WasmPluginsIPRestrictionAllow,WasmPluginsIPRestrictionDeny make higress-wasmplugin-test`
++ API Tests: `make higress-conformance-test`
++ Gateway API Tests: `make gateway-conformance-test`
++ WasmPlugin Tests: `make higress-wasmplugin-test`
+    + Build all Go WasmPlugins for testing: `make higress-wasmplugin-test`
+    + Build tests for a specific Go WasmPlugin only: `PLUGIN_NAME=ip-restriction make higress-wasmplugin-test`
+    + Build tests for a specific C++ WasmPlugin only: `PLUGIN_TYPE=CPP PLUGIN_NAME=key_auth make higress-wasmplugin-test`
+    + Build all Rust WasmPlugins for testing: `PLUGIN_TYPE=RUST make higress-wasmplugin-test`
+    + Build tests for a specific Rust WasmPlugin only: `PLUGIN_TYPE=RUST PLUGIN_NAME=ai-data-masking make higress-wasmplugin-test`
+    + Run specific tests only (separated by commas): `TEST_SHORTNAME=WasmPluginsIPRestrictionAllow,WasmPluginsIPRestrictionDeny make higress-wasmplugin-test`
+    + Build a specific Go WasmPlugin and run selected tests only: `PLUGIN_NAME=ip-restriction TEST_SHORTNAME=WasmPluginsIPRestrictionAllow,WasmPluginsIPRestrictionDeny make higress-wasmplugin-test`
+    + Skip building the higress dev image, build only a specific Go WasmPlugin and run selected tests: `PLUGIN_NAME=ip-restriction TEST_SHORTNAME=WasmPluginsIPRestrictionAllow,WasmPluginsIPRestrictionDeny make higress-wasmplugin-test-skip-docker-build`
+
 
 It can be divided into below steps:
 
@@ -56,8 +62,8 @@ The test environment reusability is primarily achieved through the following tar
       - **make run-higress-e2e-test-clean:** Can be used to clean up the basic resources installed during the setup phase of the test cases.
    - **make higress-conformance-test-clean:** Used to clean up the test environment for deployments like higress-controller, higress-gateway, etc.
 
-2. **make higress-wasmplugin-test:** Used to run the entire WasmPlugin testing process, including setting up the test environment, compiling WasmPlugin plugins, executing test cases, and cleaning up the test environment.
-   - **make higress-wasmplugin-test-prepare:** Can be used to set up the environment for deployments such as higress-controller, higress-gateway, and compile WasmPlugin plugins.
+2. **make higress-wasmplugin-test:** Used to run the entire WasmPlugin testing process, including setting up the test environment, compiling WasmPlugin plugins, executing test cases, and cleaning up the test environment. Using **make higress-wasmplugin-test-skip-docker-build** can skip building the higress dev image.
+   - **make higress-wasmplugin-test-prepare:** Can be used to set up the environment for deployments such as higress-controller, higress-gateway, and compile WasmPlugin plugins. Using **make higress-wasmplugin-test-prepare-skip-docker-build** can skip building the higress dev image.
    - **make run-higress-e2e-test-wasmplugin:** Used to run the test cases.
       - **make run-higress-e2e-test-wasmplugin-setup:** Can be used to install the basic resources required for the test cases, such as nacos, dubbo, etc.
       - **make run-higress-e2e-test-wasmplugin-run:** Used to execute the test cases.
@@ -66,15 +72,6 @@ The test environment reusability is primarily achieved through the following tar
 
 ## Gateway APIs Conformance Tests
 
-Gateway API Conformance tests are based on the suite provided by `kubernetes-sig/gateway-api`, we can reuse that,
-and decide what conformance tests we need to open. Conformance tests of Gateway API.
+Run `make gateway-conformance-test` to execute the upstream Gateway API v1.6.0 Conformance Suite. The default scope covers the required `GATEWAY-HTTP`, `GATEWAY-TLS`, `GATEWAY-GRPC`, and `GATEWAY-TCP` Core profiles with `Gateway`, `HTTPRoute`, `TLSRoute`, `GRPCRoute`, `TCPRoute`, and `ReferenceGrant`; unsupported Extended features are not enabled.
 
-This API covers a broad set of features and use cases and has been implemented widely.
-This combination of both a large feature set and variety of implementations requires
-clear conformance definitions and tests to ensure the API provides a consistent experience wherever it is used.
-
-Gateway API includes a set of conformance tests. These create a series of Gateways and Routes with the specified
-GatewayClass, and test that the implementation matches the API specification.
-
-Each release contains a set of conformance tests, these will continue to expand as the API evolves.
-Currently conformance tests cover the majority of Core capabilities in the standard channel, in addition to some Extended capabilities.
+The runner imports the upstream suite and its embedded manifests directly, so Higress does not maintain copies of official test cases. Set `GATEWAY_CONFORMANCE_RUN_TEST=<ShortName>` only when debugging one upstream test. The default PR workflow always runs the complete Core profile and stores the generated report as a CI artifact.

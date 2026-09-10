@@ -18,10 +18,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alibaba/higress/test/e2e/conformance/utils/config"
-	"github.com/alibaba/higress/test/e2e/conformance/utils/kubernetes"
-	"github.com/alibaba/higress/test/e2e/conformance/utils/roundtripper"
-	"istio.io/istio/pilot/pkg/util/sets"
+	"github.com/alibaba/higress/v2/test/e2e/conformance/utils/config"
+	"github.com/alibaba/higress/v2/test/e2e/conformance/utils/kubernetes"
+	"github.com/alibaba/higress/v2/test/e2e/conformance/utils/roundtripper"
+	"istio.io/istio/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -29,7 +29,7 @@ const (
 	TestAreaAll   = "all"
 	TestAreaSetup = "setup"
 	TestAreaRun   = "run"
-	TessAreaClean = "clean"
+	TestAreaClean = "clean"
 )
 
 // ConformanceTestSuite defines the test suite used to run Gateway API
@@ -43,16 +43,16 @@ type ConformanceTestSuite struct {
 	Cleanup           bool
 	BaseManifests     []string
 	Applier           kubernetes.Applier
-	SkipTests         sets.Set
-	ExecuteTests      sets.Set
+	SkipTests         sets.Set[string]
+	ExecuteTests      sets.Set[string]
 	TimeoutConfig     config.TimeoutConfig
-	SupportedFeatures sets.Set
+	SupportedFeatures sets.Set[string]
 }
 
 // Options can be used to initialize a ConformanceTestSuite.
 type Options struct {
-	SupportedFeatures sets.Set
-	ExemptFeatures    sets.Set
+	SupportedFeatures sets.Set[string]
+	ExemptFeatures    sets.Set[string]
 	ExecuteTests      string
 
 	EnableAllSupportedFeatures bool
@@ -91,7 +91,7 @@ func New(s Options) *ConformanceTestSuite {
 	}
 
 	if s.SupportedFeatures == nil {
-		s.SupportedFeatures = sets.Set{}
+		s.SupportedFeatures = sets.Set[string]{}
 	}
 
 	if s.IsWasmPluginTest {
@@ -120,7 +120,7 @@ func New(s Options) *ConformanceTestSuite {
 		BaseManifests:     s.BaseManifests,
 		SupportedFeatures: s.SupportedFeatures,
 		GatewayAddress:    s.GatewayAddress,
-		ExecuteTests:      sets.NewSet(),
+		ExecuteTests:      sets.New[string](),
 		Applier: kubernetes.Applier{
 			NamespaceLabels: s.NamespaceLabels,
 		},
@@ -136,6 +136,7 @@ func New(s Options) *ConformanceTestSuite {
 			"base/nacos.yaml",
 			"base/dubbo.yaml",
 			"base/opa.yaml",
+			"base/llm-mock.yaml",
 		}
 	}
 
@@ -173,6 +174,7 @@ func (suite *ConformanceTestSuite) Setup(t *testing.T) {
 		"higress-conformance-infra",
 		"higress-conformance-app-backend",
 		"higress-conformance-web-backend",
+		"higress-conformance-ai-backend",
 	}
 	kubernetes.NamespacesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, namespaces)
 
@@ -216,12 +218,13 @@ type ConformanceTest struct {
 	ShortName   string
 	Description string
 	PreDeleteRs []string
-	Manifests   []string
-	Features    []SupportedFeature
-	Slow        bool
-	Parallel    bool
-	Test        func(*testing.T, *ConformanceTestSuite)
-	NotCleanup  bool
+	//PreApplyHook func(*testing.T, *ConformanceTestSuite)
+	Manifests  []string
+	Features   []SupportedFeature
+	Slow       bool
+	Parallel   bool
+	Test       func(*testing.T, *ConformanceTestSuite)
+	NotCleanup bool
 }
 
 // Run runs an individual tests, applying and cleaning up the required manifests
@@ -254,6 +257,12 @@ func (test *ConformanceTest) Run(t *testing.T, suite *ConformanceTestSuite) {
 		t.Logf("🧳 Applying PreDeleteRs Manifests: %s", manifestLocation)
 		suite.Applier.MustDelete(t, suite.Client, suite.TimeoutConfig, manifestLocation)
 	}
+
+	// Run PreApplyHook if defined (e.g., to create prerequisites before applying manifests)
+	//if test.PreApplyHook != nil {
+	//	t.Logf("🔧 Running PreApplyHook for test: %s", test.ShortName)
+	//	test.PreApplyHook(t, suite)
+	//}
 
 	for _, manifestLocation := range test.Manifests {
 		t.Logf("🧳 Applying Manifests: %s", manifestLocation)

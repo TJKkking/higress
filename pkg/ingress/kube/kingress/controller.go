@@ -26,35 +26,37 @@ import (
 	"github.com/hashicorp/go-multierror"
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/model"
+	istiomodel "istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/model/credentials"
-	"istio.io/istio/pilot/pkg/util/sets"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/config/schema/gvr"
+	schemakubeclient "istio.io/istio/pkg/config/schema/kubeclient"
 	"istio.io/istio/pkg/kube/controllers"
+	"istio.io/istio/pkg/kube/informerfactory"
+	ktypes "istio.io/istio/pkg/kube/kubetypes"
+	"istio.io/istio/pkg/util/sets"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	kset "k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/util/workqueue"
 	ingress "knative.dev/networking/pkg/apis/networking/v1alpha1"
-	networkingv1alpha1 "knative.dev/networking/pkg/client/listers/networking/v1alpha1"
+	"knative.dev/networking/pkg/client/clientset/versioned"
+	informernetworkingv1alpha1 "knative.dev/networking/pkg/client/informers/externalversions/networking/v1alpha1"
+	listernetworkingv1alpha1 "knative.dev/networking/pkg/client/listers/networking/v1alpha1"
 
-	"github.com/alibaba/higress/pkg/ingress/kube/annotations"
-	"github.com/alibaba/higress/pkg/ingress/kube/common"
-	"github.com/alibaba/higress/pkg/ingress/kube/kingress/resources"
-	"github.com/alibaba/higress/pkg/ingress/kube/secret"
-	. "github.com/alibaba/higress/pkg/ingress/log"
-	"github.com/alibaba/higress/pkg/kube"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/annotations"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/common"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/kingress/resources"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/secret"
+	. "github.com/alibaba/higress/v2/pkg/ingress/log"
+	"github.com/alibaba/higress/v2/pkg/kube"
 )
 
-var (
-	_ common.KIngressController = &controller{}
-)
+var _ common.KIngressController = &controller{}
 
 const (
 	// ClassAnnotationKey points to the annotation for the class of this resource.
@@ -63,10 +65,10 @@ const (
 )
 
 type controller struct {
-	queue                  workqueue.RateLimitingInterface
-	virtualServiceHandlers []model.EventHandler
-	gatewayHandlers        []model.EventHandler
-	envoyFilterHandlers    []model.EventHandler
+	queue                  controllers.Queue
+	virtualServiceHandlers []istiomodel.EventHandler
+	gatewayHandlers        []istiomodel.EventHandler
+	envoyFilterHandlers    []istiomodel.EventHandler
 
 	options common.Options
 
@@ -75,8 +77,8 @@ type controller struct {
 	ingresses map[string]*ingress.Ingress
 
 	ingressInformer  cache.SharedInformer
-	ingressLister    networkingv1alpha1.IngressLister
-	serviceInformer  cache.SharedInformer
+	ingressLister    listernetworkingv1alpha1.IngressLister
+	serviceInformer  informerfactory.StartableInformer
 	serviceLister    listerv1.ServiceLister
 	secretController secret.SecretController
 	statusSyncer     *statusSyncer
@@ -84,29 +86,37 @@ type controller struct {
 
 // NewController creates a new Kubernetes controller
 func NewController(localKubeClient, client kube.Client, options common.Options,
-	secretController secret.SecretController) common.KIngressController {
-	q := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
-
-	//var namespace string = "default"
-	ingressInformer := client.KIngressInformer().Networking().V1alpha1().Ingresses()
-	serviceInformer := client.KubeInformer().Core().V1().Services()
+	secretController secret.SecretController,
+) common.KIngressController {
+	var ingressInformer cache.SharedIndexInformer
+	if options.WatchNamespace == "" {
+		ingressInformer = client.KIngressInformer().Networking().V1alpha1().Ingresses().Informer()
+	} else {
+		ingressInformer = client.KIngressInformer().InformerFor(&ingress.Ingress{}, func(c versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+			return informernetworkingv1alpha1.NewIngressInformer(c, options.WatchNamespace, resyncPeriod, nil)
+		})
+	}
+	ingressLister := listernetworkingv1alpha1.NewIngressLister(ingressInformer.GetIndexer())
+	serviceInformer := schemakubeclient.GetInformerFilteredFromGVR(client, ktypes.InformerOptions{Namespace: options.WatchNamespace}, gvr.Service)
+	serviceLister := listerv1.NewServiceLister(serviceInformer.Informer.GetIndexer())
 
 	c := &controller{
 		options:          options,
-		queue:            q,
 		ingresses:        make(map[string]*ingress.Ingress),
-		ingressInformer:  ingressInformer.Informer(),
-		ingressLister:    ingressInformer.Lister(),
-		serviceInformer:  serviceInformer.Informer(),
-		serviceLister:    serviceInformer.Lister(),
+		ingressInformer:  ingressInformer,
+		ingressLister:    ingressLister,
+		serviceInformer:  serviceInformer,
+		serviceLister:    serviceLister,
 		secretController: secretController,
 	}
 
-	handler := controllers.LatestVersionHandlerFuncs(controllers.EnqueueForSelf(q))
-	c.ingressInformer.AddEventHandler(handler)
+	c.queue = controllers.NewQueue("kingress",
+		controllers.WithReconciler(c.onEvent),
+		controllers.WithMaxAttempts(5))
+	_, _ = c.ingressInformer.AddEventHandler(controllers.ObjectHandler(c.queue.AddObject))
 
 	if options.EnableStatus {
-		c.statusSyncer = newStatusSyncer(localKubeClient, client, c, options.SystemNamespace)
+		c.statusSyncer = newStatusSyncer(localKubeClient, client, c, options.SystemNamespace, c.serviceLister)
 	} else {
 		IngressLog.Infof("Disable status update for cluster %s", options.ClusterId)
 	}
@@ -128,44 +138,15 @@ func (c *controller) Run(stop <-chan struct{}) {
 	}
 	go c.secretController.Run(stop)
 
-	defer utilruntime.HandleCrash()
-	defer c.queue.ShutDown()
-
-	if !cache.WaitForCacheSync(stop, c.HasSynced) {
-		IngressLog.Errorf("Failed to sync ingress controller cache for cluster %s", c.options.ClusterId)
-		return
-	}
-	go wait.Until(c.worker, time.Second, stop)
-	<-stop
-}
-
-func (c *controller) worker() {
-	for c.processNextWorkItem() {
-	}
-}
-
-func (c *controller) processNextWorkItem() bool {
-	key, quit := c.queue.Get()
-	if quit {
-		return false
-	}
-	defer c.queue.Done(key)
-	ingressNamespacedName := key.(types.NamespacedName)
-	if err := c.onEvent(ingressNamespacedName); err != nil {
-		IngressLog.Errorf("error processing ingress item (%v) (retrying): %v, cluster: %s", key, err, c.options.ClusterId)
-		c.queue.AddRateLimited(key)
-	} else {
-		c.queue.Forget(key)
-	}
-	return true
+	c.queue.Run(stop)
 }
 
 func (c *controller) onEvent(namespacedName types.NamespacedName) error {
-	event := model.EventUpdate
+	event := istiomodel.EventUpdate
 	ing, err := c.ingressLister.Ingresses(namespacedName.Namespace).Get(namespacedName.Name)
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			event = model.EventDelete
+			event = istiomodel.EventDelete
 			c.mutex.Lock()
 			ing = c.ingresses[namespacedName.String()]
 			delete(c.ingresses, namespacedName.String())
@@ -179,12 +160,11 @@ func (c *controller) onEvent(namespacedName types.NamespacedName) error {
 	if ing == nil {
 		return nil
 	}
-
 	ing.Status.InitializeConditions()
 
 	// we should check need process only when event is not delete,
 	// if it is delete event, and previously processed, we need to process too.
-	if event != model.EventDelete {
+	if event != istiomodel.EventDelete {
 		shouldProcess, err := c.shouldProcessIngressUpdate(ing)
 		if err != nil {
 			return err
@@ -232,7 +212,7 @@ func (c *controller) onEvent(namespacedName types.NamespacedName) error {
 	return nil
 }
 
-func (c *controller) RegisterEventHandler(kind config.GroupVersionKind, f model.EventHandler) {
+func (c *controller) RegisterEventHandler(kind config.GroupVersionKind, f istiomodel.EventHandler) {
 	switch kind {
 	case gvk.VirtualService:
 		c.virtualServiceHandlers = append(c.virtualServiceHandlers, f)
@@ -245,7 +225,7 @@ func (c *controller) RegisterEventHandler(kind config.GroupVersionKind, f model.
 
 func (c *controller) SetWatchErrorHandler(handler func(r *cache.Reflector, err error)) error {
 	var errs error
-	if err := c.serviceInformer.SetWatchErrorHandler(handler); err != nil {
+	if err := c.serviceInformer.Informer.SetWatchErrorHandler(handler); err != nil {
 		errs = multierror.Append(errs, err)
 	}
 	if err := c.ingressInformer.SetWatchErrorHandler(handler); err != nil {
@@ -258,7 +238,7 @@ func (c *controller) SetWatchErrorHandler(handler func(r *cache.Reflector, err e
 }
 
 func (c *controller) HasSynced() bool {
-	return c.ingressInformer.HasSynced() && c.serviceInformer.HasSynced() && c.secretController.HasSynced()
+	return c.ingressInformer.HasSynced() && c.serviceInformer.Informer.HasSynced() && c.secretController.HasSynced()
 }
 
 func (c *controller) List() []config.Config {
@@ -364,17 +344,16 @@ func (c *controller) ConvertGateway(convertOptions *common.ConvertOptions, wrapp
 						Port: &networking.Port{
 							Number:   8081,
 							Protocol: string(protocol.HTTP),
-							Name:     common.CreateConvertedName("http-8081-ingress", c.options.ClusterId),
+							Name:     common.CreateConvertedName("http-8081-ingress", c.options.ClusterId.String()),
 						},
 						Hosts: []string{ruleHost},
 					})
-
 				} else {
 					wrapperGateway.Gateway.Servers = append(wrapperGateway.Gateway.Servers, &networking.Server{
 						Port: &networking.Port{
 							Number:   80,
 							Protocol: string(protocol.HTTP),
-							Name:     common.CreateConvertedName("http-80-ingress", c.options.ClusterId),
+							Name:     common.CreateConvertedName("http-80-ingress", c.options.ClusterId.String()),
 						},
 						Hosts: []string{ruleHost},
 					})
@@ -389,7 +368,7 @@ func (c *controller) ConvertGateway(convertOptions *common.ConvertOptions, wrapp
 					wrapperGateway.WrapperConfig.AnnotationsConfig.DownstreamTLS = wrapper.AnnotationsConfig.DownstreamTLS
 				}
 			}
-			//Redirect option
+			// Redirect option
 			if isIngressPublic(&kingressv1alpha1) && (kingressv1alpha1.HTTPOption == ingress.HTTPOptionRedirected) {
 				for _, server := range wrapperGateway.Gateway.Servers {
 					if protocol.Parse(server.Port.Protocol).IsHTTP() {
@@ -419,7 +398,7 @@ func (c *controller) ConvertGateway(convertOptions *common.ConvertOptions, wrapp
 			}
 
 			domainBuilder.Protocol = common.HTTPS
-			domainBuilder.SecretName = path.Join(c.options.ClusterId, cfg.Namespace, secretName)
+			domainBuilder.SecretName = path.Join(c.options.ClusterId.String(), cfg.Namespace, secretName)
 
 			// There is a matching secret and the gateway has already a tls secret.
 			// We should report the duplicated tls secret event.
@@ -436,7 +415,7 @@ func (c *controller) ConvertGateway(convertOptions *common.ConvertOptions, wrapp
 				Port: &networking.Port{
 					Number:   443,
 					Protocol: string(protocol.HTTPS),
-					Name:     common.CreateConvertedName("https-443-ingress", c.options.ClusterId),
+					Name:     common.CreateConvertedName("https-443-ingress", c.options.ClusterId.String()),
 				},
 				Hosts: []string{ruleHost},
 				Tls: &networking.ServerTLSSettings{
@@ -448,7 +427,6 @@ func (c *controller) ConvertGateway(convertOptions *common.ConvertOptions, wrapp
 			// Update domain builder
 			convertOptions.IngressDomainCache.Valid[ruleHost] = domainBuilder
 		}
-
 	}
 
 	return nil
@@ -475,13 +453,11 @@ func (c *controller) ConvertHTTPRoute(convertOptions *common.ConvertOptions, wra
 	convertOptions.HasDefaultBackend = false
 	// In one ingress, we will limit the rule conflict.
 	// When the host, pathType, path of two rule are same, we think there is a conflict event.
-	definedRules := sets.NewSet()
+	definedRules := sets.New[string]()
 
-	var (
-		// But in across ingresses case, we will restrict this limit.
-		// When the {host, path, headers, method, params} of two rule in different ingress are same, we think there is a conflict event.
-		tempRuleKey []string
-	)
+	// But in across ingresses case, we will restrict this limit.
+	// When the {host, path, headers, method, params} of two rule in different ingress are same, we think there is a conflict event.
+	var tempRuleKey []string
 
 	for _, rule := range KingressV1.Rules {
 		for _, rulehost := range rule.Hosts {
@@ -527,7 +503,7 @@ func (c *controller) ConvertHTTPRoute(convertOptions *common.ConvertOptions, wra
 
 				// Two duplicated rules in the same ingress.
 				if ingressRouteBuilder.Event == common.Normal {
-					pathFormat := wrapperHttpRoute.PathFormat()
+					pathFormat := wrapperHttpRoute.PathFormat() + kingressPathHeadersKey(httpPath.Headers)
 					if definedRules.Contains(pathFormat) {
 						ingressRouteBuilder.PreIngress = cfg
 						ingressRouteBuilder.Event = common.DuplicatedRoute
@@ -579,14 +555,14 @@ func (c *controller) ConvertHTTPRoute(convertOptions *common.ConvertOptions, wra
 			IngressLog.Debugf("routes of host %s is %v", rulehost, routes)
 			common.SortHTTPRoutes(routes)
 		}
-
 	}
 	return nil
 }
-func (c *controller) IngressRouteBuilderServicesCheck(httppath *ingress.HTTPIngressPath, namespace string,
-	builder *common.IngressRouteBuilder, config *annotations.DestinationConfig) common.Event {
 
-	//backend check
+func (c *controller) IngressRouteBuilderServicesCheck(httppath *ingress.HTTPIngressPath, namespace string,
+	builder *common.IngressRouteBuilder, config *annotations.DestinationConfig,
+) common.Event {
+	// backend check
 	if httppath.Splits == nil {
 		return common.InvalidBackendService
 	}
@@ -614,7 +590,7 @@ func (c *controller) shouldProcessIngressWithClass(ing *ingress.Ingress) bool {
 }
 
 func (c *controller) shouldProcessIngress(i *ingress.Ingress) (bool, error) {
-	//check namespace
+	// check namespace
 	if c.shouldProcessIngressWithClass(i) {
 		switch c.options.WatchNamespace {
 		case "":
@@ -624,7 +600,6 @@ func (c *controller) shouldProcessIngress(i *ingress.Ingress) (bool, error) {
 		}
 	}
 	return false, nil
-
 }
 
 // shouldProcessIngressUpdate checks whether we should renotify registered handlers about an update event
@@ -750,4 +725,26 @@ func isIngressPublic(ingSpec *ingress.IngressSpec) bool {
 		}
 	}
 	return false
+}
+
+// kingressPathHeadersKey builds a stable string from path-level headers for use
+// in duplicate-route detection. KIngress paths are distinguished by headers
+// (not by URL path), so the dedup key must include header information.
+func kingressPathHeadersKey(headers map[string]ingress.HeaderMatch) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, k := range keys {
+		sb.WriteByte('\x00')
+		sb.WriteString(k)
+		sb.WriteByte('=')
+		sb.WriteString(headers[k].Exact)
+	}
+	return sb.String()
 }

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"go.uber.org/atomic"
+	"istio.io/istio/pkg/cluster"
 	istiokube "istio.io/istio/pkg/kube"
 	apiExtensionsV1 "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,10 +35,10 @@ import (
 	kingressfake "knative.dev/networking/pkg/client/clientset/versioned/fake"
 	kingressinformer "knative.dev/networking/pkg/client/informers/externalversions"
 
-	higressclient "github.com/alibaba/higress/client/pkg/clientset/versioned"
-	higressfake "github.com/alibaba/higress/client/pkg/clientset/versioned/fake"
-	higressinformer "github.com/alibaba/higress/client/pkg/informers/externalversions"
-	"github.com/alibaba/higress/pkg/config/constants"
+	higressclient "github.com/alibaba/higress/v2/client/pkg/clientset/versioned"
+	higressfake "github.com/alibaba/higress/v2/client/pkg/clientset/versioned/fake"
+	higressinformer "github.com/alibaba/higress/v2/client/pkg/informers/externalversions"
+	"github.com/alibaba/higress/v2/pkg/config/constants"
 )
 
 type Client interface {
@@ -49,7 +50,7 @@ type Client interface {
 	// HigressInformer returns an informer for the higress client
 	HigressInformer() higressinformer.SharedInformerFactory
 
-	//KIngress return the Knative kube client
+	// KIngress return the Knative kube client
 	KIngress() kingressclient.Interface
 
 	KIngressInformer() kingressinformer.SharedInformerFactory
@@ -133,9 +134,9 @@ func NewFakeClient(objects ...runtime.Object) Client {
 	return c
 }
 
-func NewClient(clientConfig clientcmd.ClientConfig) (Client, error) {
+func NewClient(clientConfig clientcmd.ClientConfig, cluster cluster.ID) (Client, error) {
 	var c client
-	istioClient, err := istiokube.NewClient(clientConfig)
+	istioClient, err := istiokube.NewClient(clientConfig, cluster)
 	if err != nil {
 		return nil, err
 	}
@@ -176,13 +177,13 @@ func (c *client) HigressInformer() higressinformer.SharedInformerFactory {
 	return c.higressInformer
 }
 
-func (c *client) RunAndWait(stop <-chan struct{}) {
+func (c *client) RunAndWait(stop <-chan struct{}) bool {
 	c.Client.RunAndWait(stop)
 	c.higressInformer.Start(stop)
 
 	if c.fastSync {
 		fastWaitForCacheSync(stop, c.higressInformer)
-		_ = wait.PollImmediate(time.Microsecond*100, wait.ForeverTestTimeout, func() (bool, error) {
+		err := wait.PollImmediate(time.Microsecond*100, wait.ForeverTestTimeout, func() (bool, error) {
 			select {
 			case <-stop:
 				return false, fmt.Errorf("channel closed")
@@ -193,6 +194,10 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
 			}
 			return false, nil
 		})
+		if err != nil {
+			return false
+		}
+		return true
 	} else {
 		c.higressInformer.WaitForCacheSync(stop)
 	}
@@ -201,7 +206,7 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
 		c.kingressInformer.Start(stop)
 		if c.fastSync {
 			fastWaitForCacheSync(stop, c.kingressInformer)
-			_ = wait.PollImmediate(time.Microsecond*100, wait.ForeverTestTimeout, func() (bool, error) {
+			err := wait.PollImmediate(time.Microsecond*100, wait.ForeverTestTimeout, func() (bool, error) {
 				select {
 				case <-stop:
 					return false, fmt.Errorf("channel closed")
@@ -212,11 +217,15 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
 				}
 				return false, nil
 			})
+			if err != nil {
+				return false
+			}
+			return true
 		} else {
 			c.kingressInformer.WaitForCacheSync(stop)
 		}
 	}
-
+	return true
 }
 
 type reflectInformerSync interface {
@@ -247,12 +256,10 @@ func fastWaitForCacheSync(stop <-chan struct{}, informerFactory reflectInformerS
 func CheckKIngressCRDExist(config *rest.Config) bool {
 	apiExtClientset, err := apiExtensionsV1.NewForConfig(config)
 	if err != nil {
-		fmt.Errorf("failed creating apiExtension Client: %v", err)
 		return false
 	}
 	crdList, err := apiExtClientset.CustomResourceDefinitions().List(context.TODO(), metaV1.ListOptions{})
 	if err != nil {
-		fmt.Errorf("failed listing Custom Resource Definition: %v", err)
 		return false
 	}
 	for _, crd := range crdList.Items {
@@ -261,4 +268,10 @@ func CheckKIngressCRDExist(config *rest.Config) bool {
 		}
 	}
 	return false
+}
+
+// EnableCrdWatcher enables the CRD watcher on the client.
+func EnableCrdWatcher(c Client) Client {
+	istiokube.EnableCrdWatcher(c.(*client).Client)
+	return c
 }

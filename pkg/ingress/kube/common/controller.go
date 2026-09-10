@@ -15,16 +15,22 @@
 package common
 
 import (
+	"strconv"
 	"strings"
+	"time"
 
-	"github.com/alibaba/higress/pkg/cert"
-	"github.com/alibaba/higress/pkg/ingress/kube/annotations"
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config"
 	gatewaytool "istio.io/istio/pkg/config/gateway"
+	"istio.io/istio/pkg/config/protocol"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/alibaba/higress/v2/pkg/cert"
+	"github.com/alibaba/higress/v2/pkg/common"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/annotations"
 )
 
 type ServiceKey struct {
@@ -47,8 +53,47 @@ type WrapperConfigWithRuleKey struct {
 type WrapperGateway struct {
 	Gateway       *networking.Gateway
 	WrapperConfig *WrapperConfig
-	ClusterId     string
+	ClusterId     cluster.ID
 	Host          string
+}
+
+func CreateMcpServiceKey(host string, portNumber int32) ServiceKey {
+	return ServiceKey{
+		Namespace:   "mcp",
+		Name:        host,
+		ServiceFQDN: host,
+		Port:        portNumber,
+	}
+}
+
+func WrapperConfigForMcpDestination(wrapper *WrapperConfig, destination *networking.HTTPRouteDestination) *WrapperConfig {
+	if wrapper == nil || wrapper.AnnotationsConfig == nil || wrapper.AnnotationsConfig.Destination == nil ||
+		destination == nil || destination.Destination == nil {
+		return wrapper
+	}
+
+	protocol := wrapper.AnnotationsConfig.Destination.BackendProtocolForDestination(destination.Destination)
+	if protocol == "" {
+		return wrapper
+	}
+
+	annotationsConfig := *wrapper.AnnotationsConfig
+	switch protocol {
+	case "HTTP":
+		annotationsConfig.UpstreamTLS = nil
+	case "HTTPS":
+		upstreamTLS := &annotations.UpstreamTLSConfig{BackendProtocol: protocol}
+		if annotationsConfig.UpstreamTLS != nil {
+			*upstreamTLS = *annotationsConfig.UpstreamTLS
+			upstreamTLS.BackendProtocol = protocol
+		}
+		annotationsConfig.UpstreamTLS = upstreamTLS
+	}
+
+	return &WrapperConfig{
+		Config:            wrapper.Config,
+		AnnotationsConfig: &annotationsConfig,
+	}
 }
 
 func (w *WrapperGateway) IsHTTPS() bool {
@@ -65,11 +110,25 @@ func (w *WrapperGateway) IsHTTPS() bool {
 	return false
 }
 
+func CreateSSLPassthroughServer(host string, port uint32, clusterId cluster.ID) *networking.Server {
+	return &networking.Server{
+		Port: &networking.Port{
+			Number:   port,
+			Protocol: string(protocol.TLS),
+			Name:     CreateConvertedName("tls-"+strconv.FormatUint(uint64(port), 10)+"-ingress", clusterId.String()),
+		},
+		Hosts: []string{WildcardHost(host)},
+		Tls: &networking.ServerTLSSettings{
+			Mode: networking.ServerTLSSettings_PASSTHROUGH,
+		},
+	}
+}
+
 type WrapperHTTPRoute struct {
 	HTTPRoute        *networking.HTTPRoute
 	WrapperConfig    *WrapperConfig
 	RawClusterId     string
-	ClusterId        string
+	ClusterId        cluster.ID
 	ClusterName      string
 	Host             string
 	OriginPath       string
@@ -98,6 +157,50 @@ type WrapperVirtualService struct {
 	AppRoot                  string
 }
 
+func (w *WrapperVirtualService) HasTLSRouteForHost(host string) bool {
+	if w == nil || w.VirtualService == nil {
+		return false
+	}
+	host = WildcardHost(host)
+	for _, route := range w.VirtualService.Tls {
+		for _, match := range route.Match {
+			for _, sniHost := range match.SniHosts {
+				if WildcardHost(sniHost) == host {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func NewWrapperVirtualService(host string, wrapper *WrapperConfig) *WrapperVirtualService {
+	return &WrapperVirtualService{
+		VirtualService: &networking.VirtualService{
+			Hosts: []string{WildcardHost(host)},
+		},
+		WrapperConfig: wrapper,
+	}
+}
+
+func CreateTLSRoute(host string, routeDestination []*networking.RouteDestination) *networking.TLSRoute {
+	return &networking.TLSRoute{
+		Match: []*networking.TLSMatchAttributes{
+			{
+				SniHosts: []string{WildcardHost(host)},
+			},
+		},
+		Route: routeDestination,
+	}
+}
+
+func WildcardHost(host string) string {
+	if host == "" {
+		return "*"
+	}
+	return host
+}
+
 type WrapperTrafficPolicy struct {
 	TrafficPolicy     *networking.TrafficPolicy
 	PortTrafficPolicy *networking.TrafficPolicy_PortTrafficPolicy
@@ -108,6 +211,68 @@ type WrapperDestinationRule struct {
 	DestinationRule *networking.DestinationRule
 	WrapperConfig   *WrapperConfig
 	ServiceKey      ServiceKey
+}
+
+type ServiceProxyConfig struct {
+	ProxyName        string
+	UpstreamProtocol common.Protocol
+	UpstreamSni      string
+}
+
+type ServiceWrapper struct {
+	ServiceName            string
+	ServiceEntry           *networking.ServiceEntry
+	DestinationRuleWrapper *WrapperDestinationRule
+	Suffix                 string
+	RegistryType           string
+	RegistryName           string
+	ProxyConfig            *ServiceProxyConfig
+	createTime             time.Time
+}
+
+func (sew *ServiceWrapper) DeepCopy() *ServiceWrapper {
+	res := &ServiceWrapper{}
+	*res = *sew
+	res.ServiceEntry = sew.ServiceEntry.DeepCopy()
+
+	if sew.DestinationRuleWrapper != nil {
+		res.DestinationRuleWrapper = sew.DestinationRuleWrapper
+		res.DestinationRuleWrapper.DestinationRule = sew.DestinationRuleWrapper.DestinationRule.DeepCopy()
+	}
+	return res
+}
+
+func (sew *ServiceWrapper) SetCreateTime(createTime time.Time) {
+	sew.createTime = createTime
+}
+
+func (sew *ServiceWrapper) GetCreateTime() time.Time {
+	return sew.createTime
+}
+
+type ProxyWrapper struct {
+	ProxyName    string
+	ListenerPort uint32
+	EnvoyFilter  *networking.EnvoyFilter
+	createTime   time.Time
+}
+
+func (pw *ProxyWrapper) DeepCopy() *ProxyWrapper {
+	res := &ProxyWrapper{}
+	*res = *pw
+
+	if pw.EnvoyFilter != nil {
+		res.EnvoyFilter = pw.EnvoyFilter.DeepCopy()
+	}
+	return res
+}
+
+func (pw *ProxyWrapper) SetCreateTime(createTime time.Time) {
+	pw.createTime = createTime
+}
+
+func (pw *ProxyWrapper) GetCreateTime() time.Time {
+	return pw.createTime
 }
 
 type IngressController interface {
@@ -162,4 +327,10 @@ type KIngressController interface {
 
 	// HasSynced returns true after initial cache synchronization is complete
 	HasSynced() bool
+}
+
+type GatewayController interface {
+	model.ConfigStoreController
+
+	SetWatchErrorHandler(func(r *cache.Reflector, err error)) error
 }

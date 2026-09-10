@@ -20,14 +20,16 @@ import (
 	"sync"
 	"time"
 
-	apiv1 "github.com/alibaba/higress/api/networking/v1"
-	"github.com/alibaba/higress/pkg/common"
-	provider "github.com/alibaba/higress/registry"
-	"github.com/alibaba/higress/registry/memory"
 	consulapi "github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/api/watch"
 	"istio.io/api/networking/v1alpha3"
-	"istio.io/pkg/log"
+	"istio.io/istio/pkg/log"
+
+	apiv1 "github.com/alibaba/higress/v2/api/networking/v1"
+	"github.com/alibaba/higress/v2/pkg/common"
+	ingress "github.com/alibaba/higress/v2/pkg/ingress/kube/common"
+	provider "github.com/alibaba/higress/v2/registry"
+	"github.com/alibaba/higress/v2/registry/memory"
 )
 
 const (
@@ -154,7 +156,6 @@ func (w *watcher) fetchAllServices() error {
 	q.Datacenter = w.ConsulDatacenter
 	q.Token = w.authOption.ConsulToken
 	services, _, err := w.consulCatalog.Services(q)
-
 	if err != nil {
 		log.Errorf("consul fetch all services error:%v", err)
 		return err
@@ -237,7 +238,7 @@ func (w *watcher) Stop() {
 		// clean the cache
 		suffix := strings.Join([]string{serviceName, w.ConsulDatacenter, w.Type}, common.DotSeparator)
 		host := strings.ReplaceAll(suffix, common.Underscore, common.Hyphen)
-		w.cache.DeleteServiceEntryWrapper(host)
+		w.cache.DeleteServiceWrapper(host)
 	}
 	w.isStop = true
 	close(w.stop)
@@ -271,7 +272,6 @@ func (w *watcher) subscribe(serviceName string) error {
 		"type":    "service",
 		"service": serviceName,
 	})
-
 	if err != nil {
 		return err
 	}
@@ -295,22 +295,23 @@ func (w *watcher) getSubscribeCallback(serviceName string) func(idx uint64, data
 			serviceEntry := w.generateServiceEntry(host, services)
 			if serviceEntry != nil {
 				log.Infof("consul update serviceEntry %s cache", host)
-				w.cache.UpdateServiceEntryWrapper(host, &memory.ServiceEntryWrapper{
+				w.cache.UpdateServiceWrapper(host, &ingress.ServiceWrapper{
 					ServiceEntry: serviceEntry,
 					ServiceName:  serviceName,
 					Suffix:       suffix,
 					RegistryType: w.Type,
+					RegistryName: w.Name,
 				})
 			} else {
 				log.Infof("consul serviceEntry %s is nil", host)
-				//w.cache.DeleteServiceEntryWrapper(host)
+				// w.cache.DeleteServiceWrapper(host)
 			}
 		}
 	}
 }
 
 func (w *watcher) generateServiceEntry(host string, services []*consulapi.ServiceEntry) *v1alpha3.ServiceEntry {
-	portList := make([]*v1alpha3.Port, 0)
+	portList := make([]*v1alpha3.ServicePort, 0)
 	endpoints := make([]*v1alpha3.WorkloadEntry, 0)
 
 	for _, service := range services {
@@ -329,7 +330,7 @@ func (w *watcher) generateServiceEntry(host string, services []*consulapi.Servic
 			protocol = common.ParseProtocol(metaData["protocol"])
 		}
 
-		port := &v1alpha3.Port{
+		port := &v1alpha3.ServicePort{
 			Name:     protocol.String(),
 			Number:   uint32(service.Service.Port),
 			Protocol: protocol.String(),

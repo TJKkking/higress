@@ -17,8 +17,8 @@
 package scheme
 
 import (
-	extensionsv1alpha1 "github.com/alibaba/higress/client/pkg/apis/extensions/v1alpha1"
-	networkingv1 "github.com/alibaba/higress/client/pkg/apis/networking/v1"
+	extensionsv1alpha1 "github.com/alibaba/higress/v2/client/pkg/apis/extensions/v1alpha1"
+	networkingv1 "github.com/alibaba/higress/v2/client/pkg/apis/networking/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
@@ -26,25 +26,27 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
-var Scheme = runtime.NewScheme()
-var Codecs = serializer.NewCodecFactory(Scheme)
-var ParameterCodec = runtime.NewParameterCodec(Scheme)
-var localSchemeBuilder = runtime.SchemeBuilder{
-	extensionsv1alpha1.AddToScheme,
-	networkingv1.AddToScheme,
-}
+var (
+	Scheme             = runtime.NewScheme()
+	Codecs             = serializer.NewCodecFactory(Scheme)
+	ParameterCodec     = runtime.NewParameterCodec(Scheme)
+	localSchemeBuilder = runtime.SchemeBuilder{
+		extensionsv1alpha1.AddToScheme,
+		networkingv1.AddToScheme,
+	}
+)
 
 // AddToScheme adds all types of this clientset into the given scheme. This allows composition
 // of clientsets, like in:
 //
-//   import (
-//     "k8s.io/client-go/kubernetes"
-//     clientsetscheme "k8s.io/client-go/kubernetes/scheme"
-//     aggregatorclientsetscheme "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset/scheme"
-//   )
+//	import (
+//	  "k8s.io/client-go/kubernetes"
+//	  clientsetscheme "k8s.io/client-go/kubernetes/scheme"
+//	  aggregatorclientsetscheme "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset/scheme"
+//	)
 //
-//   kclientset, _ := kubernetes.NewForConfig(c)
-//   _ = aggregatorclientsetscheme.AddToScheme(clientsetscheme.Scheme)
+//	kclientset, _ := kubernetes.NewForConfig(c)
+//	_ = aggregatorclientsetscheme.AddToScheme(clientsetscheme.Scheme)
 //
 // After this, RawExtensions in Kubernetes types will serialize kube-aggregator types
 // correctly.

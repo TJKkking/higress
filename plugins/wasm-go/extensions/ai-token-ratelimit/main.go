@@ -21,49 +21,92 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"ai-token-ratelimit/config"
+	"ai-token-ratelimit/util"
+
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/tokenusage"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/resp"
 )
 
-func main() {
+func main() {}
+
+func init() {
 	wrapper.SetCtx(
 		"ai-token-ratelimit",
-		wrapper.ParseConfigBy(parseConfig),
-		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
-		wrapper.ProcessStreamingResponseBodyBy(onHttpStreamingBody),
+		wrapper.ParseConfig(parseConfig),
+		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
+		wrapper.ProcessStreamingResponseBody(onHttpStreamingBody),
 	)
 }
 
 const (
-	ClusterRateLimitFormat        string = "higress-token-ratelimit:%s:%s:%s:%s"
-	RequestPhaseFixedWindowScript string = `
-	local ttl = redis.call('ttl', KEYS[1])
-	if ttl < 0 then
-	redis.call('set', KEYS[1], ARGV[1], 'EX', ARGV[2])
-	return {ARGV[1], ARGV[1], ARGV[2]}
-	end
-	return {ARGV[1], redis.call('get', KEYS[1]), ttl}
+	RedisKeyPrefix string = "higress-token-ratelimit"
+	// 使用 {rule_name} hash tag 让多规则多键操作在 Redis Cluster 下落到同一 slot
+	// AiTokenGlobalRateLimitFormat  全局限流模式 redis key 为 RedisKeyPrefix:{限流规则名称}:global_threshold:时间窗口
+	AiTokenGlobalRateLimitFormat = RedisKeyPrefix + ":{%s}:global_threshold:%d"
+	// AiTokenRateLimitFormat 规则限流模式 redis key 为 RedisKeyPrefix:{限流规则名称}:限流类型:时间窗口:限流key名称:限流key对应的实际值
+	AiTokenRateLimitFormat = RedisKeyPrefix + ":{%s}:%s:%d:%s:%s"
+	// MultiKeyRequestPhaseScript 多规则请求阶段只读检查脚本
+	// KEYS = [key1, ..., keyN]
+	// ARGV = [threshold1, window1, threshold2, window2, ..., thresholdN, windowN]
+	// 返回嵌套数组 {{threshold_i, current_i, ttl_i}, ...}
+	MultiKeyRequestPhaseScript = `
+		local results = {}
+		for i = 1, #KEYS do
+			local threshold = tonumber(ARGV[2*i - 1])
+			local window    = tonumber(ARGV[2*i])
+			local current = redis.call('get', KEYS[i])
+			local ttl = redis.call('ttl', KEYS[i])
+
+			-- 键不存在时，返回初始状态（计数0，窗口时间为过期时间）
+			if not current then
+				table.insert(results, {threshold, 0, window})
+			else
+				-- 修复异常过期时间（确保窗口有效）
+				if ttl < 0 then
+					ttl = window
+				end
+				-- 返回窗口状态：阈值、当前计数、剩余时间
+				table.insert(results, {threshold, tonumber(current), ttl})
+			end
+		end
+		return results
 	`
-	ResponsePhaseFixedWindowScript string = `
-	local ttl = redis.call('ttl', KEYS[1])
-	if ttl < 0 then
-	redis.call('set', KEYS[1], ARGV[1]-ARGV[3], 'EX', ARGV[2])
-	return {ARGV[1], ARGV[1]-ARGV[3], ARGV[2]}
-	end
-	return {ARGV[1], redis.call('decrby', KEYS[1], ARGV[3]), ttl}
+	// MultiKeyResponsePhaseScript 多规则响应阶段累加脚本（仅 ai-token-ratelimit 使用）
+	// KEYS = [key1, ..., keyN]
+	// ARGV = [threshold1, window1, count1, ..., thresholdN, windowN, countN]
+	// 每条规则独立判断 current <= threshold 才累加；返回 KEYS 数量
+	MultiKeyResponsePhaseScript = `
+		for i = 1, #KEYS do
+			local threshold = tonumber(ARGV[3*i - 2])
+			local window    = tonumber(ARGV[3*i - 1])
+			local added     = tonumber(ARGV[3*i])
+			local current = tonumber(redis.call('get', KEYS[i]) or "0")
+			if current <= threshold then
+				current = redis.call('incrby', KEYS[i], added)
+				if current == added then
+					redis.call('expire', KEYS[i], window)
+				else
+					local ttl = redis.call('ttl', KEYS[i])
+					if ttl < 0 then redis.call('expire', KEYS[i], window) end
+				end
+			end
+		end
+		return #KEYS
 	`
 
-	LimitRedisContextKey string = "LimitRedisContext"
+	LimitRedisContextKey = "LimitRedisContext"
 
-	ConsumerHeader string = "x-mse-consumer" // LimitByConsumer从该request header获取consumer的名字
-	CookieHeader   string = "cookie"
+	CookieHeader = "cookie"
 
-	RateLimitLimitHeader     string = "X-RateLimit-Limit"     // 限制的总请求数
-	RateLimitRemainingHeader string = "X-RateLimit-Remaining" // 剩余还可以发送的请求数
-	RateLimitResetHeader     string = "X-RateLimit-Reset"     // 限流重置时间（触发限流时返回）
+	RateLimitResetHeader = "X-TokenRateLimit-Reset" // 限流重置时间（触发限流时返回）
+
+	TokenRateLimitCount = "token_ratelimit_count" // metric name
 )
 
 type LimitContext struct {
@@ -72,167 +115,247 @@ type LimitContext struct {
 	reset     int
 }
 
-type LimitRedisContext struct {
-	key    string
-	count  int64
-	window int64
+// MatchedRule 表示请求阶段命中的单条限流规则（global 或 rule_item）
+type MatchedRule struct {
+	key    string // 完整 Redis key
+	count  int64  // 时间窗口内的限额（与 LimitConfigItem.Count / GlobalThreshold.Count 同义）
+	window int64  // 时间窗口大小（秒）
 }
 
-func parseConfig(json gjson.Result, config *ClusterKeyRateLimitConfig, log wrapper.Log) error {
-	err := initRedisClusterClient(json, config)
+// LimitRedisContext 暂存请求阶段命中的全部规则，供响应阶段多键 INCRBY 使用
+type LimitRedisContext struct {
+	rules []MatchedRule
+}
+
+func parseConfig(json gjson.Result, cfg *config.AiTokenRateLimitConfig) error {
+	err := config.InitRedisClusterClient(json, cfg)
 	if err != nil {
 		return err
 	}
-	err = parseClusterKeyRateLimitConfig(json, config)
+	err = config.ParseAiTokenRateLimitConfig(json, cfg)
 	if err != nil {
 		return err
 	}
+	// Metric settings
+	cfg.CounterMetrics = make(map[string]proxywasm.MetricCounter)
 	return nil
 }
 
-func onHttpRequestHeaders(ctx wrapper.HttpContext, config ClusterKeyRateLimitConfig, log wrapper.Log) types.Action {
-	// 判断是否命中限流规则
-	val, ruleItem, configItem := checkRequestAgainstLimitRule(ctx, config.ruleItems, log)
-	if ruleItem == nil || configItem == nil {
+func onHttpRequestHeaders(ctx wrapper.HttpContext, cfg config.AiTokenRateLimitConfig) types.Action {
+	ctx.DisableReroute()
+
+	matched := collectMatchedRules(ctx, cfg)
+	if len(matched) == 0 {
+		// 无任何规则命中：直接放行，不发起 Redis 调用
+		log.Debugf("ai-token-ratelimit: no rule matched, path=%s host=%s", ctx.Path(), ctx.Host())
 		return types.ActionContinue
 	}
 
-	// 构建redis限流key和参数
-	limitKey := fmt.Sprintf(ClusterRateLimitFormat, config.ruleName, ruleItem.limitType, ruleItem.key, val)
-	keys := []interface{}{limitKey}
-	args := []interface{}{configItem.count, configItem.timeWindow}
-
-	limitRedisContext := LimitRedisContext{
-		key:    limitKey,
-		count:  configItem.count,
-		window: configItem.timeWindow,
+	log.Debugf("ai-token-ratelimit: request phase matched %d rule(s), path=%s host=%s",
+		len(matched), ctx.Path(), ctx.Host())
+	for i, m := range matched {
+		log.Debugf("ai-token-ratelimit:   rule[%d] key=%s threshold=%d window=%ds",
+			i, m.key, m.count, m.window)
 	}
-	ctx.SetContext(LimitRedisContextKey, limitRedisContext)
 
-	// 执行限流逻辑
-	err := config.redisClient.Eval(RequestPhaseFixedWindowScript, 1, keys, args, func(response resp.Value) {
-		resultArray := response.Array()
-		if len(resultArray) != 3 {
-			log.Errorf("redis response parse error, response: %v", response)
-			proxywasm.ResumeHttpRequest()
+	n := len(matched)
+	keys := make([]interface{}, n)
+	args := make([]interface{}, 0, n*2)
+	for i, m := range matched {
+		keys[i] = m.key
+		args = append(args, m.count, m.window)
+	}
+
+	// 暂存命中规则，供响应阶段多键 INCRBY 使用
+	ctx.SetContext(LimitRedisContextKey, LimitRedisContext{rules: matched})
+
+	err := cfg.RedisClient.Eval(MultiKeyRequestPhaseScript, n, keys, args, func(response resp.Value) {
+		arr := response.Array()
+		if len(arr) != n {
+			log.Errorf("redis response length mismatch: got %d, want %d", len(arr), n)
+			_ = proxywasm.ResumeHttpRequest()
 			return
 		}
-		context := LimitContext{
-			count:     resultArray[0].Integer(),
-			remaining: resultArray[1].Integer(),
-			reset:     resultArray[2].Integer(),
+
+		// 单次遍历：触发即 return；未触发则放行。
+		// ai-token-ratelimit 不对外暴露 LimitContext（与 cluster-key-ratelimit 不同，
+		// 后者通过 X-RateLimit-* 头可观测 tightest 选择），因此此处不再写入 Context。
+		for i, ruleResult := range arr {
+			ruleState := ruleResult.Array()
+			if len(ruleState) != 3 {
+				log.Errorf("redis sub-array length mismatch: got %d, want 3", len(ruleState))
+				_ = proxywasm.ResumeHttpRequest()
+				return
+			}
+			threshold, current, ttl := ruleState[0].Integer(), ruleState[1].Integer(), ruleState[2].Integer()
+			log.Debugf("ai-token-ratelimit:   eval rule[%d] key=%s threshold=%d current=%d ttl=%ds",
+				i, matched[i].key, threshold, current, ttl)
+
+			if current > threshold {
+				// 命中触发的第一条规则（按 collectMatchedRules 顺序，global 优先）
+				log.Debugf("ai-token-ratelimit: rule[%d] key=%s triggered (current=%d > threshold=%d), rejecting with code %d",
+					i, matched[i].key, current, threshold, cfg.RejectedCode)
+				ctx.SetUserAttribute("token_ratelimit_status", "limited")
+				_ = ctx.WriteUserAttributeToLogWithKey(wrapper.AILogKey)
+				rejected(cfg, LimitContext{
+					count:     threshold,
+					remaining: threshold - current,
+					reset:     ttl,
+				})
+				return
+			}
 		}
-		if context.remaining < 0 {
-			// 触发限流
-			rejected(config, context)
-		} else {
-			proxywasm.ResumeHttpRequest()
-		}
+
+		log.Debugf("ai-token-ratelimit: all %d rule(s) within threshold, allowing request to proceed", n)
+		_ = proxywasm.ResumeHttpRequest()
 	})
+
 	if err != nil {
 		log.Errorf("redis call failed: %v", err)
 		return types.ActionContinue
 	}
-	return types.ActionPause
+	return types.HeaderStopAllIterationAndWatermark
 }
 
-func onHttpStreamingBody(ctx wrapper.HttpContext, config ClusterKeyRateLimitConfig, data []byte, endOfStream bool, log wrapper.Log) []byte {
+func onHttpStreamingBody(ctx wrapper.HttpContext, cfg config.AiTokenRateLimitConfig, data []byte, endOfStream bool) []byte {
+	if usage := tokenusage.GetTokenUsage(ctx, data); usage.TotalToken > 0 {
+		log.Debugf("ai-token-ratelimit: token usage detected input=%d output=%d total=%d",
+			usage.InputToken, usage.OutputToken, usage.TotalToken)
+		ctx.SetContext(tokenusage.CtxKeyInputToken, usage.InputToken)
+		ctx.SetContext(tokenusage.CtxKeyOutputToken, usage.OutputToken)
+	}
 	if !endOfStream {
 		return data
 	}
-	inputTokenStr, err := proxywasm.GetProperty([]string{"filter_state", "wasm.input_token"})
-	if err != nil {
-		return data
-	}
-	outputTokenStr, err := proxywasm.GetProperty([]string{"filter_state", "wasm.output_token"})
-	if err != nil {
-		return data
-	}
-	inputToken, err := strconv.Atoi(string(inputTokenStr))
-	if err != nil {
-		return data
-	}
-	outputToken, err := strconv.Atoi(string(outputTokenStr))
-	if err != nil {
-		return data
-	}
-	limitRedisContext, ok := ctx.GetContext(LimitRedisContextKey).(LimitRedisContext)
-	if !ok {
-		return data
-	}
-	keys := []interface{}{limitRedisContext.key}
-	args := []interface{}{limitRedisContext.count, limitRedisContext.window, inputToken + outputToken}
 
-	err = config.redisClient.Eval(ResponsePhaseFixedWindowScript, 1, keys, args, nil)
+	inputTokenRaw := ctx.GetContext(tokenusage.CtxKeyInputToken)
+	outputTokenRaw := ctx.GetContext(tokenusage.CtxKeyOutputToken)
+	if inputTokenRaw == nil || outputTokenRaw == nil {
+		log.Debugf("ai-token-ratelimit: response phase end-of-stream reached but no token usage recorded, skipping")
+		return data
+	}
+	inputToken, ok1 := inputTokenRaw.(int64)
+	outputToken, ok2 := outputTokenRaw.(int64)
+	if !ok1 || !ok2 {
+		log.Errorf("ai-token-ratelimit: response phase token usage context has unexpected types: input=%T output=%T",
+			inputTokenRaw, outputTokenRaw)
+		return data
+	}
+
+	limitRedisContextRaw := ctx.GetContext(LimitRedisContextKey)
+	if limitRedisContextRaw == nil {
+		log.Debugf("ai-token-ratelimit: response phase reached with no LimitRedisContext, skipping accumulation")
+		return data
+	}
+	limitRedisContext, ok := limitRedisContextRaw.(LimitRedisContext)
+	if !ok || len(limitRedisContext.rules) == 0 {
+		log.Debugf("ai-token-ratelimit: response phase LimitRedisContext is empty, skipping accumulation")
+		return data
+	}
+
+	// 多键 INCRBY：每条规则一组 (threshold, window, added)
+	n := len(limitRedisContext.rules)
+	keys := make([]interface{}, n)
+	args := make([]interface{}, 0, n*3)
+	added := inputToken + outputToken
+	log.Debugf("ai-token-ratelimit: response phase accumulating tokens input=%d output=%d total=%d across %d rule(s)",
+		inputToken, outputToken, added, n)
+	for i, r := range limitRedisContext.rules {
+		keys[i] = r.key
+		args = append(args, r.count, r.window, added)
+		log.Debugf("ai-token-ratelimit:   rule[%d] key=%s threshold=%d window=%ds added=%d",
+			i, r.key, r.count, r.window, added)
+	}
+
+	err := cfg.RedisClient.Eval(MultiKeyResponsePhaseScript, n, keys, args, func(response resp.Value) {
+		incremented := response.Integer()
+		log.Debugf("ai-token-ratelimit: response phase INCRBY done, %d/%d rule(s) updated", incremented, n)
+	})
 	if err != nil {
 		log.Errorf("redis call failed: %v", err)
-		return data
-	} else {
-		return data
 	}
+	return data
 }
 
-func checkRequestAgainstLimitRule(ctx wrapper.HttpContext, ruleItems []LimitRuleItem, log wrapper.Log) (string, *LimitRuleItem, *LimitConfigItem) {
-	for _, rule := range ruleItems {
-		val, ruleItem, configItem := hitRateRuleItem(ctx, rule, log)
-		if ruleItem != nil && configItem != nil {
-			return val, ruleItem, configItem
+// collectMatchedRules 遍历 global_threshold 和 rule_items，返回所有命中规则。
+// 顺序：global_threshold（如有）→ rule_items 中所有命中项（按数组顺序追加）。
+// 该顺序决定了"触发时优先报告哪条规则"以及"未触发时 tightest 的选择范围"。
+func collectMatchedRules(ctx wrapper.HttpContext, cfg config.AiTokenRateLimitConfig) []MatchedRule {
+	var matched []MatchedRule
+
+	if cfg.GlobalThreshold != nil {
+		matched = append(matched, MatchedRule{
+			key:    fmt.Sprintf(AiTokenGlobalRateLimitFormat, cfg.RuleName, cfg.GlobalThreshold.TimeWindow),
+			count:  cfg.GlobalThreshold.Count,
+			window: cfg.GlobalThreshold.TimeWindow,
+		})
+	}
+
+	for _, ruleItem := range cfg.RuleItems {
+		val, hitRule, hitItem := hitRateRuleItem(ctx, ruleItem)
+		if hitRule != nil && hitItem != nil {
+			matched = append(matched, MatchedRule{
+				key:    fmt.Sprintf(AiTokenRateLimitFormat, cfg.RuleName, hitRule.LimitType, hitItem.TimeWindow, hitRule.Key, val),
+				count:  hitItem.Count,
+				window: hitItem.TimeWindow,
+			})
 		}
 	}
-	return "", nil, nil
+
+	return matched
 }
 
-func hitRateRuleItem(ctx wrapper.HttpContext, rule LimitRuleItem, log wrapper.Log) (string, *LimitRuleItem, *LimitConfigItem) {
-	switch rule.limitType {
+func hitRateRuleItem(ctx wrapper.HttpContext, rule config.LimitRuleItem) (string, *config.LimitRuleItem, *config.LimitConfigItem) {
+	switch rule.LimitType {
 	// 根据HTTP请求头限流
-	case limitByHeaderType, limitByPerHeaderType:
-		val, err := proxywasm.GetHttpRequestHeader(rule.key)
+	case config.LimitByHeaderType, config.LimitByPerHeaderType:
+		val, err := proxywasm.GetHttpRequestHeader(rule.Key)
 		if err != nil {
-			return logDebugAndReturnEmpty(log, "failed to get request header %s: %v", rule.key, err)
+			return logDebugAndReturnEmpty("failed to get request header %s: %v", rule.Key, err)
 		}
-		return val, &rule, findMatchingItem(rule.limitType, rule.configItems, val)
+		return val, &rule, findMatchingItem(rule.LimitType, rule.ConfigItems, val)
 	// 根据HTTP请求参数限流
-	case limitByParamType, limitByPerParamType:
+	case config.LimitByParamType, config.LimitByPerParamType:
 		parse, err := url.Parse(ctx.Path())
 		if err != nil {
-			return logDebugAndReturnEmpty(log, "failed to parse request path: %v", err)
+			return logDebugAndReturnEmpty("failed to parse request path: %v", err)
 		}
 		query, err := url.ParseQuery(parse.RawQuery)
 		if err != nil {
-			return logDebugAndReturnEmpty(log, "failed to parse query params: %v", err)
+			return logDebugAndReturnEmpty("failed to parse query params: %v", err)
 		}
-		val, ok := query[rule.key]
+		val, ok := query[rule.Key]
 		if !ok {
-			return logDebugAndReturnEmpty(log, "request param %s is empty", rule.key)
+			return logDebugAndReturnEmpty("request param %s is empty", rule.Key)
 		}
-		return val[0], &rule, findMatchingItem(rule.limitType, rule.configItems, val[0])
+		return val[0], &rule, findMatchingItem(rule.LimitType, rule.ConfigItems, val[0])
 	// 根据consumer限流
-	case limitByConsumerType, limitByPerConsumerType:
-		val, err := proxywasm.GetHttpRequestHeader(ConsumerHeader)
+	case config.LimitByConsumerType, config.LimitByPerConsumerType:
+		val, err := proxywasm.GetHttpRequestHeader(util.ConsumerHeader)
 		if err != nil {
-			return logDebugAndReturnEmpty(log, "failed to get request header %s: %v", ConsumerHeader, err)
+			return logDebugAndReturnEmpty("failed to get request header %s: %v", util.ConsumerHeader, err)
 		}
-		return val, &rule, findMatchingItem(rule.limitType, rule.configItems, val)
+		return val, &rule, findMatchingItem(rule.LimitType, rule.ConfigItems, val)
 	// 根据cookie中key值限流
-	case limitByCookieType, limitByPerCookieType:
+	case config.LimitByCookieType, config.LimitByPerCookieType:
 		cookie, err := proxywasm.GetHttpRequestHeader(CookieHeader)
 		if err != nil {
-			return logDebugAndReturnEmpty(log, "failed to get request cookie : %v", err)
+			return logDebugAndReturnEmpty("failed to get request cookie : %v", err)
 		}
-		val := extractCookieValueByKey(cookie, rule.key)
+		val := util.ExtractCookieValueByKey(cookie, rule.Key)
 		if val == "" {
-			return logDebugAndReturnEmpty(log, "cookie key '%s' extracted from cookie '%s' is empty.", rule.key, cookie)
+			return logDebugAndReturnEmpty("cookie key '%s' extracted from cookie '%s' is empty.", rule.Key, cookie)
 		}
-		return val, &rule, findMatchingItem(rule.limitType, rule.configItems, val)
+		return val, &rule, findMatchingItem(rule.LimitType, rule.ConfigItems, val)
 	// 根据客户端IP限流
-	case limitByPerIpType:
+	case config.LimitByPerIpType:
 		realIp, err := getDownStreamIp(rule)
 		if err != nil {
 			log.Warnf("failed to get down stream ip: %v", err)
 			return "", &rule, nil
 		}
-		for _, item := range rule.configItems {
-			if _, found, _ := item.ipNet.Get(realIp); !found {
+		for _, item := range rule.ConfigItems {
+			if _, found, _ := item.IpNet.Get(realIp); !found {
 				continue
 			}
 			return realIp.String(), &rule, &item
@@ -241,37 +364,37 @@ func hitRateRuleItem(ctx wrapper.HttpContext, rule LimitRuleItem, log wrapper.Lo
 	return "", nil, nil
 }
 
-func logDebugAndReturnEmpty(log wrapper.Log, errMsg string, args ...interface{}) (string, *LimitRuleItem, *LimitConfigItem) {
+func logDebugAndReturnEmpty(errMsg string, args ...interface{}) (string, *config.LimitRuleItem, *config.LimitConfigItem) {
 	log.Debugf(errMsg, args...)
 	return "", nil, nil
 }
 
-func findMatchingItem(limitType limitRuleItemType, items []LimitConfigItem, key string) *LimitConfigItem {
+func findMatchingItem(limitType config.LimitRuleItemType, items []config.LimitConfigItem, key string) *config.LimitConfigItem {
 	for _, item := range items {
 		// per类型,检查allType和regexpType
-		if limitType == limitByPerHeaderType ||
-			limitType == limitByPerParamType ||
-			limitType == limitByPerConsumerType ||
-			limitType == limitByPerCookieType {
-			if item.configType == allType || (item.configType == regexpType && item.regexp.MatchString(key)) {
+		if limitType == config.LimitByPerHeaderType ||
+			limitType == config.LimitByPerParamType ||
+			limitType == config.LimitByPerConsumerType ||
+			limitType == config.LimitByPerCookieType {
+			if item.ConfigType == config.AllType || (item.ConfigType == config.RegexpType && item.Regexp.MatchString(key)) {
 				return &item
 			}
 		}
 		// 其他类型,直接比较key
-		if item.key == key {
+		if item.Key == key {
 			return &item
 		}
 	}
 	return nil
 }
 
-func getDownStreamIp(rule LimitRuleItem) (net.IP, error) {
+func getDownStreamIp(rule config.LimitRuleItem) (net.IP, error) {
 	var (
 		realIpStr string
 		err       error
 	)
-	if rule.limitByPerIp.sourceType == HeaderSourceType {
-		realIpStr, err = proxywasm.GetHttpRequestHeader(rule.limitByPerIp.headerName)
+	if rule.LimitByPerIp.SourceType == config.HeaderSourceType {
+		realIpStr, err = proxywasm.GetHttpRequestHeader(rule.LimitByPerIp.HeaderName)
 		if err == nil {
 			realIpStr = strings.Split(strings.Trim(realIpStr, " "), ",")[0]
 		}
@@ -283,7 +406,7 @@ func getDownStreamIp(rule LimitRuleItem) (net.IP, error) {
 	if err != nil {
 		return nil, err
 	}
-	ip := parseIP(realIpStr)
+	ip := util.ParseIP(realIpStr)
 	realIP := net.ParseIP(ip)
 	if realIP == nil {
 		return nil, fmt.Errorf("invalid ip[%s]", ip)
@@ -291,9 +414,18 @@ func getDownStreamIp(rule LimitRuleItem) (net.IP, error) {
 	return realIP, nil
 }
 
-func rejected(config ClusterKeyRateLimitConfig, context LimitContext) {
+func generateMetricName(route, cluster, model, consumer, metricName string) string {
+	return fmt.Sprintf("route.%s.upstream.%s.model.%s.consumer.%s.metric.%s", route, cluster, model, consumer, metricName)
+}
+
+func rejected(cfg config.AiTokenRateLimitConfig, context LimitContext) {
 	headers := make(map[string][]string)
 	headers[RateLimitResetHeader] = []string{strconv.Itoa(context.reset)}
 	_ = proxywasm.SendHttpResponseWithDetail(
-		config.rejectedCode, "ai-token-ratelimit.rejected", reconvertHeaders(headers), []byte(config.rejectedMsg), -1)
+		cfg.RejectedCode, "ai-token-ratelimit.rejected", util.ReconvertHeaders(headers), []byte(cfg.RejectedMsg), -1)
+
+	route, _ := util.GetRouteName()
+	cluster, _ := util.GetClusterName()
+	consumer, _ := util.GetConsumer()
+	cfg.IncrementCounter(generateMetricName(route, cluster, "none", consumer, TokenRateLimitCount), 1)
 }

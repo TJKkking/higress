@@ -15,6 +15,7 @@
 package nacos
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,16 +27,17 @@ import (
 	"github.com/nacos-group/nacos-sdk-go/model"
 	"github.com/nacos-group/nacos-sdk-go/vo"
 	"istio.io/api/networking/v1alpha3"
-	"istio.io/pkg/log"
+	"istio.io/istio/pkg/log"
 
-	apiv1 "github.com/alibaba/higress/api/networking/v1"
-	"github.com/alibaba/higress/pkg/common"
-	provider "github.com/alibaba/higress/registry"
-	"github.com/alibaba/higress/registry/memory"
+	apiv1 "github.com/alibaba/higress/v2/api/networking/v1"
+	"github.com/alibaba/higress/v2/pkg/common"
+	ingress "github.com/alibaba/higress/v2/pkg/ingress/kube/common"
+	provider "github.com/alibaba/higress/v2/registry"
+	"github.com/alibaba/higress/v2/registry/memory"
 )
 
 const (
-	DefaultNacosTimeout         = 5000
+	DefaultNacosTimeout         = 30000
 	DefaultNacosLogLevel        = "warn"
 	DefaultNacosLogDir          = "/var/log/nacos/log/"
 	DefaultNacosCacheDir        = "/var/log/nacos/cache/"
@@ -46,6 +48,8 @@ const (
 	DefaultRefreshInterval      = time.Second * 30
 	DefaultRefreshIntervalLimit = time.Second * 10
 	DefaultFetchPageSize        = 50
+	DefaultFetchRetryBackoff    = time.Second
+	DefaultFetchMaxRetries      = 10
 	DefaultJoiner               = "@@"
 )
 
@@ -77,6 +81,7 @@ func NewWatcher(cache memory.Cache, opts ...WatcherOption) (provider.Watcher, er
 	}
 
 	w.NacosRefreshInterval = int64(DefaultRefreshInterval)
+	w.NacosTimeout = DefaultNacosTimeout
 
 	for _, opt := range opts {
 		opt(w)
@@ -89,7 +94,7 @@ func NewWatcher(cache memory.Cache, opts ...WatcherOption) (provider.Watcher, er
 	log.Infof("new nacos watcher with config Name:%s", w.Name)
 
 	cc := constant.NewClientConfig(
-		constant.WithTimeoutMs(DefaultNacosTimeout),
+		constant.WithTimeoutMs(uint64(w.NacosTimeout)),
 		constant.WithLogLevel(DefaultNacosLogLevel),
 		constant.WithLogDir(DefaultNacosLogDir),
 		constant.WithCacheDir(DefaultNacosCacheDir),
@@ -116,6 +121,12 @@ func NewWatcher(cache memory.Cache, opts ...WatcherOption) (provider.Watcher, er
 	w.namingClient = namingClient
 
 	return w, nil
+}
+
+func WithVport(vport *apiv1.RegistryConfig_VPort) WatcherOption {
+	return func(w *watcher) {
+		w.Vport = vport
+	}
 }
 
 func WithNacosNamespaceId(nacosNamespaceId string) WatcherOption {
@@ -146,6 +157,15 @@ func WithNacosRefreshInterval(refreshInterval int64) WatcherOption {
 			refreshInterval = int64(DefaultRefreshIntervalLimit)
 		}
 		w.NacosRefreshInterval = refreshInterval
+	}
+}
+
+func WithNacosTimeout(timeout int64) WatcherOption {
+	return func(w *watcher) {
+		if timeout <= 0 {
+			timeout = DefaultNacosTimeout
+		}
+		w.NacosTimeout = timeout
 	}
 }
 
@@ -203,22 +223,35 @@ func (w *watcher) Run() {
 
 func (w *watcher) fetchAllServices() error {
 	w.mutex.Lock()
-	defer w.mutex.Unlock()
 	if w.isStop {
+		w.mutex.Unlock()
 		return nil
 	}
+	nacosGroups := append([]string(nil), w.NacosGroups...)
+	nacosNamespace := w.NacosNamespace
+	namingClient := w.namingClient
+	w.mutex.Unlock()
+
 	fetchedServices := make(map[string]bool)
-	for _, groupName := range w.NacosGroups {
+	var tries int
+	for _, groupName := range nacosGroups {
 		for page := 1; ; page++ {
-			ss, err := w.namingClient.GetAllServicesInfo(vo.GetAllServiceInfoParam{
+			ss, err := namingClient.GetAllServicesInfo(vo.GetAllServiceInfoParam{
 				GroupName: groupName,
 				PageNo:    uint32(page),
 				PageSize:  DefaultFetchPageSize,
-				NameSpace: w.NacosNamespace,
+				NameSpace: nacosNamespace,
 			})
 			if err != nil {
-				log.Errorf("fetch all services error:%v", err)
-				break
+				if tries >= DefaultFetchMaxRetries {
+					return err
+				}
+				tries++
+				backoff := fetchRetryBackoff(tries)
+				log.Errorf("fetch all services error:%v, pageNo:%d, retry:%d, backoff:%v", err, page, tries, backoff)
+				time.Sleep(backoff)
+				page--
+				continue
 			}
 			for _, serviceName := range ss.Doms {
 				fetchedServices[groupName+DefaultJoiner+serviceName] = true
@@ -227,6 +260,12 @@ func (w *watcher) fetchAllServices() error {
 				break
 			}
 		}
+	}
+
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if w.isStop {
+		return nil
 	}
 
 	for key := range w.WatchingServices {
@@ -254,6 +293,13 @@ func (w *watcher) fetchAllServices() error {
 	return nil
 }
 
+func fetchRetryBackoff(retry int) time.Duration {
+	if retry <= 0 {
+		return 0
+	}
+	return time.Duration(retry) * DefaultFetchRetryBackoff
+}
+
 func (w *watcher) subscribe(groupName string, serviceName string) error {
 	log.Debugf("subscribe service, groupName:%s, serviceName:%s", groupName, serviceName)
 
@@ -262,7 +308,6 @@ func (w *watcher) subscribe(groupName string, serviceName string) error {
 		GroupName:         groupName,
 		SubscribeCallback: w.getSubscribeCallback(groupName, serviceName),
 	})
-
 	if err != nil {
 		log.Errorf("subscribe service error:%v, groupName:%s, serviceName:%s", err, groupName, serviceName)
 		return err
@@ -279,7 +324,6 @@ func (w *watcher) unsubscribe(groupName string, serviceName string) error {
 		GroupName:         groupName,
 		SubscribeCallback: w.getSubscribeCallback(groupName, serviceName),
 	})
-
 	if err != nil {
 		log.Errorf("unsubscribe service error:%v, groupName:%s, serviceName:%s", err, groupName, serviceName)
 		return err
@@ -296,12 +340,12 @@ func (w *watcher) getSubscribeCallback(groupName string, serviceName string) fun
 	return func(services []model.SubscribeService, err error) {
 		defer w.UpdateService()
 
-		//log.Info("callback", "serviceName", serviceName, "suffix", suffix, "details", services)
+		// log.Info("callback", "serviceName", serviceName, "suffix", suffix, "details", services)
 
 		if err != nil {
 			if strings.Contains(err.Error(), "hosts is empty") {
 				if w.updateCacheWhenEmpty {
-					w.cache.DeleteServiceEntryWrapper(host)
+					w.cache.DeleteServiceWrapper(host)
 				}
 			} else {
 				log.Errorf("callback error:%v", err)
@@ -312,19 +356,20 @@ func (w *watcher) getSubscribeCallback(groupName string, serviceName string) fun
 			return
 		}
 		serviceEntry := w.generateServiceEntry(host, services)
-		w.cache.UpdateServiceEntryWrapper(host, &memory.ServiceEntryWrapper{
+		w.cache.UpdateServiceWrapper(host, &ingress.ServiceWrapper{
 			ServiceName:  serviceName,
 			ServiceEntry: serviceEntry,
 			Suffix:       suffix,
 			RegistryType: w.Type,
+			RegistryName: w.Name,
 		})
 	}
 }
 
 func (w *watcher) generateServiceEntry(host string, services []model.SubscribeService) *v1alpha3.ServiceEntry {
-	portList := make([]*v1alpha3.Port, 0)
+	portList := make([]*v1alpha3.ServicePort, 0)
 	endpoints := make([]*v1alpha3.WorkloadEntry, 0)
-
+	sePort := provider.GetServiceVport(host, w.Vport)
 	for _, service := range services {
 		protocol := common.HTTP
 		if service.Metadata != nil && service.Metadata["protocol"] != "" {
@@ -332,18 +377,33 @@ func (w *watcher) generateServiceEntry(host string, services []model.SubscribeSe
 		} else {
 			service.Metadata = make(map[string]string)
 		}
-		port := &v1alpha3.Port{
+		port := &v1alpha3.ServicePort{
 			Name:     protocol.String(),
 			Number:   uint32(service.Port),
 			Protocol: protocol.String(),
 		}
 		if len(portList) == 0 {
-			portList = append(portList, port)
+			if sePort != nil {
+				sePort.Name = port.Name
+				sePort.Protocol = port.Protocol
+				portList = append(portList, sePort)
+			} else {
+				portList = append(portList, port)
+			}
+		}
+		// Calculate weight from Nacos instance
+		// Nacos weight is float64, need to convert to uint32 for Istio
+		// Use math.Round to preserve fractional weights (e.g., 0.5, 1.5)
+		// If weight is 0 or negative, use default weight 1
+		weight := uint32(1)
+		if service.Weight > 0 {
+			weight = uint32(math.Round(service.Weight))
 		}
 		endpoint := v1alpha3.WorkloadEntry{
 			Address: service.Ip,
 			Ports:   map[string]uint32{port.Protocol: port.Number},
 			Labels:  service.Metadata,
+			Weight:  weight,
 		}
 		endpoints = append(endpoints, &endpoint)
 	}
@@ -374,7 +434,7 @@ func (w *watcher) Stop() {
 		suffix := strings.Join([]string{s[0], w.NacosNamespace, w.Type}, common.DotSeparator)
 		suffix = strings.ReplaceAll(suffix, common.Underscore, common.Hyphen)
 		host := strings.Join([]string{s[1], suffix}, common.DotSeparator)
-		w.cache.DeleteServiceEntryWrapper(host)
+		w.cache.DeleteServiceWrapper(host)
 	}
 	w.isStop = true
 	close(w.stop)

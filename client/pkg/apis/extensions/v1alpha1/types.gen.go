@@ -17,7 +17,7 @@
 package v1alpha1
 
 import (
-	extensionsv1alpha1 "github.com/alibaba/higress/api/extensions/v1alpha1"
+	extensionsv1alpha1 "github.com/alibaba/higress/v2/api/extensions/v1alpha1"
 	metav1alpha1 "istio.io/api/meta/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -65,5 +65,5 @@ type WasmPluginList struct {
 	v1.TypeMeta `json:",inline"`
 	// +optional
 	v1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
-	Items       []WasmPlugin `json:"items" protobuf:"bytes,2,rep,name=items"`
+	Items       []*WasmPlugin `json:"items" protobuf:"bytes,2,rep,name=items"`
 }

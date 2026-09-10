@@ -1,3 +1,4 @@
+<a name="readme-top"></a>
 <h1 align="center">
     <img src="https://img.alicdn.com/imgextra/i2/O1CN01NwxLDd20nxfGBjxmZ_!!6000000006895-2-tps-960-290.png" alt="Higress" width="240" height="72.5">
   <br>
@@ -5,170 +6,258 @@
 </h1>
 <h4 align="center"> AI Native API Gateway </h4>
 
-[![Build Status](https://github.com/alibaba/higress/actions/workflows/build-and-test.yaml/badge.svg?branch=main)](https://github.com/alibaba/higress/actions)
-[![license](https://img.shields.io/github/license/alibaba/higress.svg)](https://www.apache.org/licenses/LICENSE-2.0.html)
+<div align="center">
 
-[**官网**](https://higress.io/) &nbsp; |
-&nbsp; [**文档**](https://higress.io/docs/latest/user/quickstart/) &nbsp; |
-&nbsp; [**博客**](https://higress.io/blog/) &nbsp; |
-&nbsp; [**开发指引**](https://higress.io/docs/latest/dev/architecture/) &nbsp; |
-&nbsp; [**AI插件**](https://higress.io/plugin/) &nbsp;
+[![Build Status](https://github.com/higress-group/higress/actions/workflows/build-and-test.yaml/badge.svg?branch=main)](https://github.com/higress-group/higress/actions)
+[![license](https://img.shields.io/github/license/higress-group/higress.svg)](https://www.apache.org/licenses/LICENSE-2.0.html)
+[![discord](https://img.shields.io/discord/1364956090566971515?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=flat-square)](https://discord.gg/tSbww9VDaM)
+[![CNCF Sandbox](https://img.shields.io/badge/CNCF-Sandbox-30638E?logo=linuxfoundation&logoColor=white)](https://www.cncf.io/projects/)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12667/badge)](https://www.bestpractices.dev/projects/12667)
 
+<a href="https://trendshift.io/repositories/26458" target="_blank"><img src="https://trendshift.io/api/badge/repositories/26458" alt="higress-group%2Fhigress | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a> <a href="https://www.producthunt.com/posts/higress?embed=true&utm_source=badge-featured&utm_medium=badge&utm_source=badge-higress" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=951287&theme=light&t=1745492822283" alt="Higress - Global&#0032;APIs&#0032;as&#0032;MCP&#0032;powered&#0032;by&#0032;AI&#0032;Gateway | Product Hunt" style="width: 250px; height: 54px;" width="250" height="54" /></a>
+
+</div>
+
+[**Official Site**](https://higress.ai/en/) &nbsp; |
+&nbsp; [**Docs**](https://higress.cn/en/docs/latest/overview/what-is-higress/) &nbsp; |
+&nbsp; [**Blog**](https://higress.cn/en/blog/) &nbsp; |
+&nbsp; [**Roadmap**](https://github.com/higress-group/community/blob/main/ROADMAP.md) &nbsp; |
+&nbsp; [**MCP Server QuickStart**](https://higress.cn/en/ai/mcp-quick-start/) &nbsp; |
+&nbsp; [**Developer Guide**](https://higress.cn/en/docs/latest/dev/architecture/) &nbsp; |
+&nbsp; [**Wasm Plugin Hub**](https://higress.cn/en/plugin/) &nbsp; |
 
 <p>
-   <a href="README_EN.md"> English <a/> | 中文
+   English | <a href="README_ZH.md">中文</a> | <a href="README_JP.md">日本語</a>
 </p>
 
+## What is Higress?
 
-Higress 是基于阿里内部多年的 Envoy Gateway 实践沉淀，以开源 [Istio](https://github.com/istio/istio) 与 [Envoy](https://github.com/envoyproxy/envoy) 为核心构建的云原生 API 网关。
+Higress is a cloud-native API gateway based on Istio and Envoy, which can be extended with Wasm plugins written in Go/Rust/JS. It provides dozens of ready-to-use general-purpose plugins and an out-of-the-box console (try the [demo here](http://demo.higress.io/)).
 
-Higress 在阿里内部作为 AI 网关，承载了通义千问 APP、百炼大模型 API、机器学习 PAI 平台等 AI 业务的流量。
+### Core Use Cases
 
-Higress 能够用统一的协议对接国内外所有 LLM 模型厂商，同时具备丰富的 AI 可观测、多模型负载均衡/fallback、AI token 流控、AI 缓存等能力：
+Higress's AI gateway capabilities support all [mainstream model providers](https://github.com/higress-group/higress/tree/main/plugins/wasm-go/extensions/ai-proxy/provider) both domestic and international. It also supports hosting MCP (Model Context Protocol) Servers through its plugin mechanism, enabling AI Agents to easily call various tools and services. With the [openapi-to-mcp tool](https://github.com/higress-group/openapi-to-mcpserver), you can quickly convert OpenAPI specifications into remote MCP servers for hosting. Higress provides unified management for both LLM API and MCP API.
 
-![](https://img.alicdn.com/imgextra/i1/O1CN01fNnhCp1cV8mYPRFeS_!!6000000003605-0-tps-1080-608.jpg)
+**🌟 Try it now at [https://mcp.higress.ai/](https://mcp.higress.ai/)** to experience Higress-hosted Remote MCP Servers firsthand:
 
+![Higress MCP Server Platform](https://img.alicdn.com/imgextra/i2/O1CN01nmVa0a1aChgpyyWOX_!!6000000003294-0-tps-3430-1742.jpg)
+
+### Production Adoption
+
+Higress originated at Alibaba to address long-connection disruption during
+gateway reloads and improve gRPC/Dubbo load balancing. It is now developed as
+a vendor-neutral CNCF project and is used by organizations across multiple
+industries. Public adopters and their use cases are listed in
+[`ADOPTERS.md`](https://github.com/higress-group/community/blob/main/ADOPTERS.md).
 
 
 ## Summary
 
-- [**快速开始**](#快速开始)    
-- [**功能展示**](#功能展示)
-- [**使用场景**](#使用场景)
-- [**核心优势**](#核心优势)
-- [**社区**](#社区)
+- [**Quick Start**](#quick-start)
+- [**Feature Showcase**](#feature-showcase)
+- [**Use Cases**](#use-cases)
+- [**Core Advantages**](#core-advantages)
+- [**Community**](#community)
 
-## 快速开始
+## Quick Start
 
-Higress 只需 Docker 即可启动，方便个人开发者在本地搭建学习，或者用于搭建简易站点:
+Higress can be started with just Docker, making it convenient for individual developers to set up locally for learning or for building simple sites:
 
 ```bash
-# 创建一个工作目录
+# Create a working directory
 mkdir higress; cd higress
-# 启动 higress，配置文件会写到工作目录下
+# Start higress, configuration files will be written to the working directory
 docker run -d --rm --name higress-ai -v ${PWD}:/data \
         -p 8001:8001 -p 8080:8080 -p 8443:8443  \
         higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:latest
 ```
 
-监听端口说明如下：
+Port descriptions:
 
-- 8001 端口：Higress UI 控制台入口
-- 8080 端口：网关 HTTP 协议入口
-- 8443 端口：网关 HTTPS 协议入口
+- Port 8001: Higress UI console entry
+- Port 8080: Gateway HTTP protocol entry
+- Port 8443: Gateway HTTPS protocol entry
 
-**Higress 的所有 Docker 镜像都一直使用自己独享的仓库，不受 Docker Hub 境内不可访问的影响**
+> Higress publishes project images through dedicated regional registry
+> endpoints. Operators may mirror the images to a registry they control and
+> configure the Helm `global.hub` value accordingly.
+>
+> If you experience a timeout when pulling image from `higress-registry.cn-hangzhou.cr.aliyuncs.com`, you can try replacing it with the following docker registry mirror source:
+>
+> **North America**: `higress-registry.us-west-1.cr.aliyuncs.com`
+>
+> **Southeast Asia**: `higress-registry.ap-southeast-7.cr.aliyuncs.com`
 
-K8s 下使用 Helm 部署等其他安装方式可以参考官网 [Quick Start 文档](https://higress.io/docs/latest/user/quickstart/)。
+> **For Kubernetes deployments**, you can configure the `global.hub` parameter in Helm values to use a mirror registry closer to your region. This applies to both Higress component images and built-in Wasm plugin images:
+>
+> ```bash
+> # Example: Using North America mirror
+> helm install higress -n higress-system higress.io/higress --set global.hub=higress-registry.us-west-1.cr.aliyuncs.com --create-namespace
+> ```
+>
+> Available mirror registries:
+> - **China (Hangzhou)**: `higress-registry.cn-hangzhou.cr.aliyuncs.com` (default)
+> - **North America**: `higress-registry.us-west-1.cr.aliyuncs.com`
+> - **Southeast Asia**: `higress-registry.ap-southeast-7.cr.aliyuncs.com`
 
+For other installation methods such as Helm deployment under K8s, please refer to the official [Quick Start documentation](https://higress.ai/en/docs/latest/user/quickstart/).
 
-## 使用场景
+## Use Cases
 
-- **AI 网关**:
+- **MCP Server Hosting**:
 
-  Higress 提供了一站式的 AI 插件集，可以增强依赖 AI 能力业务的稳定性、灵活性、可观测性，使得业务与 AI 的集成更加便捷和高效。
+  Higress hosts MCP Servers through its plugin mechanism, enabling AI Agents to easily call various tools and services. With the [openapi-to-mcp tool](https://github.com/higress-group/openapi-to-mcpserver), you can quickly convert OpenAPI specifications into remote MCP servers.
 
-- **Kubernetes Ingress 网关**:
+  ![](https://img.alicdn.com/imgextra/i1/O1CN01wv8H4g1mS4MUzC1QC_!!6000000004952-2-tps-1764-597.png)
 
-  Higress 可以作为 K8s 集群的 Ingress 入口网关, 并且兼容了大量 K8s Nginx Ingress 的注解，可以从 K8s Nginx Ingress 快速平滑迁移到 Higress。
-  
-  支持 [Gateway API](https://gateway-api.sigs.k8s.io/) 标准，支持用户从 Ingress API 平滑迁移到 Gateway API。
-  
-- **微服务网关**:
+  Key benefits of hosting MCP Servers with Higress:
+  - Unified authentication and authorization mechanisms
+  - Fine-grained rate limiting to prevent abuse
+  - Comprehensive audit logs for all tool calls
+  - Rich observability for monitoring performance
+  - Simplified deployment through Higress's plugin mechanism
+  - Dynamic updates without disruption or connection drops
 
-  Higress 可以作为微服务网关, 能够对接多种类型的注册中心发现服务配置路由，例如 Nacos, ZooKeeper, Consul, Eureka 等。
-  
-  并且深度集成了 [Dubbo](https://github.com/apache/dubbo), [Nacos](https://github.com/alibaba/nacos), [Sentinel](https://github.com/alibaba/Sentinel) 等微服务技术栈，基于 Envoy C++ 网关内核的出色性能，相比传统 Java 类微服务网关，可以显著降低资源使用率，减少成本。
-  
-- **安全防护网关**:
+     [Learn more...](https://higress.cn/en/ai/mcp-quick-start/?spm=36971b57.7beea2de.0.0.d85f20a94jsWGm)
 
-  Higress 可以作为安全防护网关， 提供 WAF 的能力，并且支持多种认证鉴权策略，例如 key-auth, hmac-auth, jwt-auth, basic-auth, oidc 等。  
+- **AI Gateway**:
 
-## 核心优势
+  Higress connects to all LLM model providers using a unified protocol, with AI observability, multi-model load balancing, token rate limiting, and caching capabilities:
 
-- **生产等级**
+  Higress is also listed as a conformant [Gateway API Inference Extension implementation](https://gateway-api-inference-extension.sigs.k8s.io/implementations/gateways/#higress), supporting inference-aware routing on Kubernetes.
 
-  脱胎于阿里巴巴2年多生产验证的内部产品，支持每秒请求量达数十万级的大规模场景。
+  ![](https://img.alicdn.com/imgextra/i2/O1CN01izmBNX1jbHT7lP3Yr_!!6000000004566-0-tps-1920-1080.jpg)
 
-  彻底摆脱 Nginx reload 引起的流量抖动，配置变更毫秒级生效且业务无感。对 AI 业务等长连接场景特别友好。
+- **Kubernetes ingress controller**:
 
-- **流式处理**
+  Higress can function as a feature-rich ingress controller and is listed in the official [Kubernetes Ingress Controllers documentation](https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/). It is compatible with many annotations of the Kubernetes NGINX Ingress Controller.
 
-  支持真正的完全流式处理请求/响应 Body，Wasm 插件很方便地自定义处理 SSE （Server-Sent Events）等流式协议的报文。
+  Higress supports the [Gateway API](https://gateway-api.sigs.k8s.io/) standard and is listed as a [conformant Gateway API implementation](https://gateway-api.sigs.k8s.io/implementations/#higress), enabling smooth migration from the Ingress API to the Gateway API.
 
-  在 AI 业务等大带宽场景下，可以显著降低内存开销。  
-    
-- **便于扩展**
-  
-  提供丰富的官方插件库，涵盖 AI、流量管理、安全防护等常用功能，满足90%以上的业务场景需求。
+  Compared to ingress-nginx, the resource overhead has significantly decreased, and the speed at which route changes take effect has improved by ten times.
 
-  主打 Wasm 插件扩展，通过沙箱隔离确保内存安全，支持多种编程语言，允许插件版本独立升级，实现流量无损热更新网关逻辑。
+  > The following resource overhead comparison comes from [sealos](https://github.com/labring).
+  >
+  > For details, you can read this [article](https://sealos.io/blog/sealos-envoy-vs-nginx-2000-tenants) to understand how sealos migrates the monitoring of **tens of thousands of ingress** resources from nginx ingress to higress.
 
-- **安全易用**
-  
-  基于 Ingress API 和 Gateway API 标准，提供开箱即用的 UI 控制台，WAF 防护插件、IP/Cookie CC 防护插件开箱即用。
-
-  支持对接 Let's Encrypt 自动签发和续签免费证书，并且可以脱离 K8s 部署，一行 Docker 命令即可启动，方便个人开发者使用。
-
-
-## 功能展示
-
-### AI 网关 Demo 展示
-
-[从 OpenAI 到其他大模型，30 秒完成迁移
-](https://www.bilibili.com/video/BV1dT421a7w7/?spm_id_from=333.788.recommend_more_video.14)
-
-
-### Higress UI 控制台
-    
-- **丰富的可观测**
-
-  提供开箱即用的可观测，Grafana&Prometheus 可以使用内置的也可对接自建的
-
-  ![](./docs/images/monitor.gif)
-    
-
-- **插件扩展机制**
-
-  官方提供了多种插件，用户也可以[开发](./plugins/wasm-go)自己的插件，构建成 docker/oci 镜像后在控制台配置，可以实时变更插件逻辑，对流量完全无损。
-
-  ![](./docs/images/plugin.gif)
+   ![](https://img.alicdn.com/imgextra/i1/O1CN01bhEtb229eeMNBWmdP_!!6000000008093-2-tps-750-547.png)
 
 
-- **多种服务发现**
+- **Microservice gateway**:
 
-  默认提供 K8s Service 服务发现，通过配置可以对接 Nacos/ZooKeeper 等注册中心实现服务发现，也可以基于静态 IP 或者 DNS 来发现
+  Higress can function as a microservice gateway, which can discovery microservices from various service registries, such as Nacos, ZooKeeper, Consul, Eureka, etc.
 
-  ![](./docs/images/service-source.gif)
-    
+  It deeply integrates with [Dubbo](https://github.com/apache/dubbo), [Nacos](https://github.com/alibaba/nacos), [Sentinel](https://github.com/alibaba/Sentinel) and other microservice technology stacks.
 
-- **域名和证书**
+- **Security gateway**:
 
-  可以创建管理 TLS 证书，并配置域名的 HTTP/HTTPS 行为，域名策略里支持对特定域名生效插件
-
-  ![](./docs/images/domain.gif)
+  Higress can be used as a security gateway, supporting WAF and various authentication strategies, such as key-auth, hmac-auth, jwt-auth, basic-auth, oidc, etc.
 
 
-- **丰富的路由能力**
+## Core Advantages
 
-  通过上面定义的服务发现机制，发现的服务会出现在服务列表中；创建路由时，选择域名，定义路由匹配机制，再选择目标服务进行路由；路由策略里支持对特定路由生效插件
+- **Production Grade**
 
-  ![](./docs/images/route-service.gif)
+  Born from Alibaba's internal product with over 2 years of production validation, supporting large-scale scenarios with hundreds of thousands of requests per second.
 
+  Completely eliminates traffic jitter caused by Nginx reload, configuration changes take effect in milliseconds and are transparent to business. Especially friendly to long-connection scenarios such as AI businesses.
 
-## 社区
+- **Streaming Processing**
 
-### 感谢
+  Supports true complete streaming processing of request/response bodies, Wasm plugins can easily customize the handling of streaming protocols such as SSE (Server-Sent Events).
 
-如果没有 Envoy 和 Istio 的开源工作，Higress 就不可能实现，在这里向这两个项目献上最诚挚的敬意。
+  In high-bandwidth scenarios such as AI businesses, it can significantly reduce memory overhead.
 
-### 交流群
+- **Easy to Extend**
 
-![image](https://img.alicdn.com/imgextra/i2/O1CN01qPd7Ix1uZPVEsWjWp_!!6000000006051-0-tps-720-405.jpg)
+  Provides a rich official plugin library covering AI, traffic management, security protection and other common functions, meeting more than 90% of business scenario requirements.
 
-### 技术分享
+  Focuses on Wasm plugin extensions, ensuring memory safety through sandbox isolation, supporting multiple programming languages, allowing plugin versions to be upgraded independently, and achieving traffic-lossless hot updates of gateway logic.
 
-微信公众号：
+- **Secure and Easy to Use**
 
-![](https://img.alicdn.com/imgextra/i1/O1CN01WnQt0q1tcmqVDU73u_!!6000000005923-0-tps-258-258.jpg)
+  Based on Ingress API and Gateway API standards, provides out-of-the-box UI console, WAF protection plugin, IP/Cookie CC protection plugin ready to use.
 
+  Supports connecting to Let's Encrypt for automatic issuance and renewal of free certificates, and can be deployed outside of K8s, started with a single Docker command, convenient for individual developers to use.
+
+## Community
+
+Join our Discord community! This is where you can connect with developers and other enthusiastic users of Higress.
+
+[![discord](https://img.shields.io/discord/1364956090566971515?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=for-the-badge)](https://discord.gg/tSbww9VDaM)
+
+Join the monthly [Higress Community Meeting](https://github.com/higress-group/community/blob/main/MEETINGS.md) for public project
+updates, technical discussions, roadmap planning, and community questions.
+
+The complete inventory of public and private communication channels,
+subproject channels, meeting information, and contributor activity is in
+[`COMMUNITY.md`](https://github.com/higress-group/community/blob/main/COMMUNITY.md).
+
+### Code of Conduct
+
+The Higress community follows the
+[**CNCF Code of Conduct**](https://github.com/cncf/foundation/blob/main/code-of-conduct.md).
+The project's adopted Code of Conduct is documented in
+[`CODE_OF_CONDUCT.md`](https://github.com/higress-group/community/blob/main/CODE_OF_CONDUCT.md).
+Please review it before
+participating in the community.
+
+### Governance & Maintainers
+
+Project governance, the maintainer roster, and the contribution model are
+described in [`GOVERNANCE.md`](https://github.com/higress-group/community/blob/main/GOVERNANCE.md)
+and [`MAINTAINERS.md`](https://github.com/higress-group/community/blob/main/MAINTAINERS.md).
+New contributors are encouraged to start
+with [`CONTRIBUTING_EN.md`](./CONTRIBUTING_EN.md). Forward planning and release
+procedures are documented in [`ROADMAP.md`](https://github.com/higress-group/community/blob/main/ROADMAP.md)
+and
+[`RELEASE.md`](./RELEASE.md).
+
+### Security
+
+Please report security vulnerabilities following the process described in
+[`SECURITY.md`](./SECURITY.md).
+
+### Thanks
+
+Higress would not be possible without the valuable open-source work of projects in the community. We would like to extend a special thank you to Envoy and Istio.
+
+### Related Repositories
+
+- Higress Console: https://github.com/higress-group/higress-console
+- Higress Standalone: https://github.com/higress-group/higress-standalone
+- Higress Plugin Server: https://github.com/higress-group/plugin-server
+- Higress Wasm Plugin Golang SDK: https://github.com/higress-group/wasm-go
+
+### Contributors
+
+<a href="https://github.com/higress-group/higress/graphs/contributors">
+  <img alt="contributors" src="https://contrib.rocks/image?repo=higress-group/higress"/>
+</a>
+
+### Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=higress-group/higress&type=Date)](https://star-history.com/#higress-group/higress&Date)
+
+---
+
+## Cloud Native Computing Foundation
+
+<a href="https://www.cncf.io/projects/" target="_blank">
+  <img src="https://raw.githubusercontent.com/cncf/artwork/master/other/cncf/horizontal/color/cncf-color.svg" alt="Cloud Native Computing Foundation" width="300"/>
+</a>
+
+We are a [Cloud Native Computing Foundation](https://www.cncf.io/) sandbox project.
+
+The Linux Foundation® (TLF) has registered trademarks and uses trademarks. For
+a list of TLF trademarks, see [Trademark Usage](https://www.linuxfoundation.org/legal/trademark-usage).
+
+Copyright Higress a Series of LF Projects, LLC. For website terms of use,
+trademark policy and other project policies please see
+[https://lfprojects.org/policies/](https://lfprojects.org/policies/).
+
+<p align="right" style="font-size: 14px; color: #555; margin-top: 20px;">
+    <a href="#readme-top" style="text-decoration: none; color: #007bff; font-weight: bold;">
+        ↑ Back to Top ↑
+    </a>
+</p>

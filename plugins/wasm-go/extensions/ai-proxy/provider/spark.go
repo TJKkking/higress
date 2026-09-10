@@ -2,25 +2,23 @@ package provider
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/alibaba/higress/plugins/wasm-go/extensions/ai-proxy/util"
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
-	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 )
 
 // sparkProvider is the provider for SparkLLM AI service.
 const (
-	sparkHost               = "spark-api-open.xf-yun.com"
-	sparkChatCompletionPath = "/v1/chat/completions"
+	sparkHost = "spark-api-open.xf-yun.com"
 )
 
-type sparkProviderInitializer struct {
-}
+type sparkProviderInitializer struct{}
 
 type sparkProvider struct {
 	config       ProviderConfig
@@ -52,11 +50,18 @@ type sparkStreamResponse struct {
 	Created int64  `json:"created"`
 }
 
-func (i *sparkProviderInitializer) ValidateConfig(config ProviderConfig) error {
+func (i *sparkProviderInitializer) ValidateConfig(config *ProviderConfig) error {
 	return nil
 }
 
+func (i *sparkProviderInitializer) DefaultCapabilities() map[string]string {
+	return map[string]string{
+		string(ApiNameChatCompletion): PathOpenAIChatCompletions,
+	}
+}
+
 func (i *sparkProviderInitializer) CreateProvider(config ProviderConfig) (Provider, error) {
+	config.setDefaultCapabilities(i.DefaultCapabilities())
 	return &sparkProvider{
 		config:       config,
 		contextCache: createContextCache(&config),
@@ -67,99 +72,65 @@ func (p *sparkProvider) GetProviderType() string {
 	return providerTypeSpark
 }
 
-func (p *sparkProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, log wrapper.Log) (types.Action, error) {
-	if apiName != ApiNameChatCompletion {
+func (p *sparkProvider) OnRequestHeaders(ctx wrapper.HttpContext, apiName ApiName) error {
+	p.config.handleRequestHeaders(p, ctx, apiName)
+	return nil
+}
+
+func (p *sparkProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) (types.Action, error) {
+	if !p.config.isSupportedAPI(apiName) {
 		return types.ActionContinue, errUnsupportedApiName
 	}
-	_ = util.OverwriteRequestHost(sparkHost)
-	_ = util.OverwriteRequestPath(sparkChatCompletionPath)
-	_ = util.OverwriteRequestAuthorization("Bearer " + p.config.GetRandomToken())
-	_ = proxywasm.RemoveHttpRequestHeader("Accept-Encoding")
-	_ = proxywasm.RemoveHttpRequestHeader("Content-Length")
-	return types.ActionContinue, nil
+	return p.config.handleRequestBody(p, p.contextCache, ctx, apiName, body)
 }
 
-func (p *sparkProvider) OnRequestBody(ctx wrapper.HttpContext, apiName ApiName, body []byte, log wrapper.Log) (types.Action, error) {
+func (p *sparkProvider) TransformResponseBody(ctx wrapper.HttpContext, apiName ApiName, body []byte) ([]byte, error) {
 	if apiName != ApiNameChatCompletion {
-		return types.ActionContinue, errUnsupportedApiName
+		return body, nil
 	}
-	// 使用Spark协议
-	if p.config.protocol == protocolOriginal {
-		request := &sparkRequest{}
-		if err := json.Unmarshal(body, request); err != nil {
-			return types.ActionContinue, fmt.Errorf("unable to unmarshal request: %v", err)
-		}
-		if request.Model == "" {
-			return types.ActionContinue, errors.New("request model is empty")
-		}
-		// 目前星火在模型名称错误时，也会调用generalv3，这里还是按照输入的模型名称设置响应里的模型名称
-		ctx.SetContext(ctxKeyFinalRequestModel, request.Model)
-		return types.ActionContinue, replaceJsonRequestBody(request, log)
-	} else {
-		// 使用openai协议
-		request := &chatCompletionRequest{}
-		if err := decodeChatCompletionRequest(body, request); err != nil {
-			return types.ActionContinue, err
-		}
-		if request.Model == "" {
-			return types.ActionContinue, errors.New("missing model in chat completion request")
-		}
-		// 映射模型
-		mappedModel := getMappedModel(request.Model, p.config.modelMapping, log)
-		if mappedModel == "" {
-			return types.ActionContinue, errors.New("model becomes empty after applying the configured mapping")
-		}
-		ctx.SetContext(ctxKeyFinalRequestModel, mappedModel)
-		request.Model = mappedModel
-		return types.ActionContinue, replaceJsonRequestBody(request, log)
-	}
-}
-
-func (p *sparkProvider) OnResponseHeaders(ctx wrapper.HttpContext, apiName ApiName, log wrapper.Log) (types.Action, error) {
-	_ = proxywasm.RemoveHttpResponseHeader("Content-Length")
-	return types.ActionContinue, nil
-}
-
-func (p *sparkProvider) OnResponseBody(ctx wrapper.HttpContext, apiName ApiName, body []byte, log wrapper.Log) (types.Action, error) {
 	sparkResponse := &sparkResponse{}
 	if err := json.Unmarshal(body, sparkResponse); err != nil {
-		return types.ActionContinue, fmt.Errorf("unable to unmarshal spark response: %v", err)
+		return nil, fmt.Errorf("unable to unmarshal spark response: %v", err)
 	}
 	if sparkResponse.Code != 0 {
-		return types.ActionContinue, fmt.Errorf("spark response error, error_code: %d, error_message: %s", sparkResponse.Code, sparkResponse.Message)
+		return nil, fmt.Errorf("spark response error, error_code: %d, error_message: %s", sparkResponse.Code, sparkResponse.Message)
 	}
 	response := p.responseSpark2OpenAI(ctx, sparkResponse)
-	return types.ActionContinue, replaceJsonResponseBody(response, log)
+	return json.Marshal(response)
 }
 
-func (p *sparkProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name ApiName, chunk []byte, isLastChunk bool, log wrapper.Log) ([]byte, error) {
-	if isLastChunk || len(chunk) == 0 {
+func (p *sparkProvider) OnStreamingResponseBody(ctx wrapper.HttpContext, name ApiName, chunk []byte, isLastChunk bool) ([]byte, error) {
+	if name != ApiNameChatCompletion {
+		return chunk, nil
+	}
+	if len(chunk) == 0 && !isLastChunk {
 		return nil, nil
 	}
 	responseBuilder := &strings.Builder{}
-	lines := strings.Split(string(chunk), "\n")
-	for _, data := range lines {
-		if len(data) < 6 {
-			// ignore blank line or wrong format
-			continue
+	for _, event := range frameSSEEvents(ctx, ctxKeySparkSSEFraming, chunk, isLastChunk) {
+		for _, data := range strings.Split(event, "\n") {
+			if len(data) < 6 {
+				// ignore blank line or wrong format
+				continue
+			}
+			data = data[6:]
+			// The final response is `data: [DONE]`
+			if data == "[DONE]" {
+				continue
+			}
+			var sparkResponse sparkStreamResponse
+			if err := json.Unmarshal([]byte(data), &sparkResponse); err != nil {
+				log.Errorf("unable to unmarshal spark response: %v", err)
+				continue
+			}
+			response := p.streamResponseSpark2OpenAI(ctx, &sparkResponse)
+			responseBody, err := json.Marshal(response)
+			if err != nil {
+				log.Errorf("unable to marshal response: %v", err)
+				return nil, err
+			}
+			p.appendResponse(responseBuilder, string(responseBody))
 		}
-		data = data[6:]
-		// The final response is `data: [DONE]`
-		if data == "[DONE]" {
-			continue
-		}
-		var sparkResponse sparkStreamResponse
-		if err := json.Unmarshal([]byte(data), &sparkResponse); err != nil {
-			log.Errorf("unable to unmarshal spark response: %v", err)
-			continue
-		}
-		response := p.streamResponseSpark2OpenAI(ctx, &sparkResponse)
-		responseBody, err := json.Marshal(response)
-		if err != nil {
-			log.Errorf("unable to marshal response: %v", err)
-			return nil, err
-		}
-		p.appendResponse(responseBuilder, string(responseBody))
 	}
 	modifiedResponseChunk := responseBuilder.String()
 	log.Debugf("=== modified response chunk: %s", modifiedResponseChunk)
@@ -180,7 +151,7 @@ func (p *sparkProvider) responseSpark2OpenAI(ctx wrapper.HttpContext, response *
 		Object:  objectChatCompletion,
 		Model:   ctx.GetStringContext(ctxKeyFinalRequestModel, ""),
 		Choices: choices,
-		Usage:   response.Usage,
+		Usage:   &response.Usage,
 	}
 }
 
@@ -198,10 +169,16 @@ func (p *sparkProvider) streamResponseSpark2OpenAI(ctx wrapper.HttpContext, resp
 		Model:   ctx.GetStringContext(ctxKeyFinalRequestModel, ""),
 		Object:  objectChatCompletion,
 		Choices: choices,
-		Usage:   response.Usage,
+		Usage:   &response.Usage,
 	}
 }
 
 func (p *sparkProvider) appendResponse(responseBuilder *strings.Builder, responseBody string) {
 	responseBuilder.WriteString(fmt.Sprintf("%s %s\n\n", streamDataItemKey, responseBody))
+}
+
+func (p *sparkProvider) TransformRequestHeaders(ctx wrapper.HttpContext, apiName ApiName, headers http.Header) {
+	util.OverwriteRequestPathHeaderByCapability(headers, string(apiName), p.config.capabilities)
+	util.OverwriteRequestHostHeader(headers, sparkHost)
+	util.OverwriteRequestAuthorizationHeader(headers, "Bearer "+p.config.GetApiTokenInUse(ctx))
 }

@@ -16,27 +16,37 @@ package ingress
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/alibaba/higress/v2/pkg/cert"
 	"github.com/google/go-cmp/cmp"
 	"istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/model"
+	istiomodel "istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/config/schema/gvr"
+	schemakubeclient "istio.io/istio/pkg/config/schema/kubeclient"
 	"istio.io/istio/pkg/kube/controllers"
+	ktypes "istio.io/istio/pkg/kube/kubetypes"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/networking/v1beta1"
 	ingress "k8s.io/api/networking/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/util/workqueue"
+	"k8s.io/apimachinery/pkg/watch"
+	listerv1 "k8s.io/client-go/listers/core/v1"
+	networkinglister "k8s.io/client-go/listers/networking/v1beta1"
 
-	"github.com/alibaba/higress/pkg/ingress/kube/annotations"
-	"github.com/alibaba/higress/pkg/ingress/kube/common"
-	"github.com/alibaba/higress/pkg/ingress/kube/secret"
-	"github.com/alibaba/higress/pkg/kube"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/annotations"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/common"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/secret"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/util"
+	"github.com/alibaba/higress/v2/pkg/kube"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,7 +56,7 @@ func TestIngressControllerApplies(t *testing.T) {
 
 	options := common.Options{IngressClass: "mse", ClusterId: ""}
 
-	secretController := secret.NewController(localKubeClient, options.ClusterId)
+	secretController := secret.NewController(localKubeClient, options)
 	ingressController := NewController(localKubeClient, client, options, secretController)
 
 	testcases := map[string]func(*testing.T, common.IngressController){
@@ -57,6 +67,1033 @@ func TestIngressControllerApplies(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			tc(t, ingressController)
 		})
+	}
+}
+
+func TestSSLPassthroughConvertGatewayAndTLSRoute(t *testing.T) {
+	c := controller{
+		options: common.Options{
+			GatewayHttpPort:  80,
+			GatewayHttpsPort: 443,
+		},
+	}
+	wrapper := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "app",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	gatewayOptions := &common.ConvertOptions{
+		Gateways:           map[string]*common.WrapperGateway{},
+		IngressDomainCache: common.NewIngressDomainCache(),
+	}
+	if err := c.ConvertGateway(gatewayOptions, wrapper, nil); err != nil {
+		t.Fatalf("ConvertGateway() error = %v", err)
+	}
+	gateway := gatewayOptions.Gateways["example.com"].Gateway
+	if len(gateway.Servers) != 2 {
+		t.Fatalf("server count mismatch, want 2, got %d", len(gateway.Servers))
+	}
+	tlsServer := gateway.Servers[1]
+	if tlsServer.Port.Protocol != "TLS" {
+		t.Fatalf("protocol mismatch, want TLS, got %s", tlsServer.Port.Protocol)
+	}
+	if tlsServer.Port.Number != 443 {
+		t.Fatalf("port mismatch, want 443, got %d", tlsServer.Port.Number)
+	}
+	if tlsServer.Tls.GetMode() != v1alpha3.ServerTLSSettings_PASSTHROUGH {
+		t.Fatalf("tls mode mismatch, want PASSTHROUGH, got %s", tlsServer.Tls.GetMode())
+	}
+
+	routeOptions := &common.ConvertOptions{}
+	if err := c.ConvertHTTPRoute(routeOptions, wrapper); err != nil {
+		t.Fatalf("ConvertHTTPRoute() error = %v", err)
+	}
+	httpRoutes := routeOptions.HTTPRoutes["example.com"]
+	if len(httpRoutes) != 1 {
+		t.Fatalf("http route count mismatch, want 1, got %d", len(httpRoutes))
+	}
+	if got := httpRoutes[0].HTTPRoute.Route[0].Destination.Host; got != "app.default.svc.cluster.local" {
+		t.Fatalf("http destination host mismatch, got %s", got)
+	}
+	routes := routeOptions.VirtualServices["example.com"].VirtualService.Tls
+	if len(routes) != 1 {
+		t.Fatalf("tls route count mismatch, want 1, got %d", len(routes))
+	}
+	route := routes[0]
+	if got := route.Match[0].SniHosts[0]; got != "example.com" {
+		t.Fatalf("sni host mismatch, want example.com, got %s", got)
+	}
+	if got := route.Route[0].Destination.Host; got != "app.default.svc.cluster.local" {
+		t.Fatalf("destination host mismatch, got %s", got)
+	}
+	if got := route.Route[0].Destination.Port.Number; got != 443 {
+		t.Fatalf("destination port mismatch, got %d", got)
+	}
+}
+
+func TestSSLPassthroughConvertTLSRouteRejectsNilInputs(t *testing.T) {
+	c := controller{}
+	wrapper := &common.WrapperConfig{
+		Config:            &config.Config{},
+		AnnotationsConfig: &annotations.Ingress{},
+	}
+
+	if err := c.ConvertTLSRoute(nil, wrapper); err == nil {
+		t.Fatal("ConvertTLSRoute() with nil convertOptions returned nil error")
+	}
+	if err := c.ConvertTLSRoute(&common.ConvertOptions{}, nil); err == nil {
+		t.Fatal("ConvertTLSRoute() with nil wrapper returned nil error")
+	}
+}
+
+func TestSSLPassthroughUsesConfiguredHTTPSPort(t *testing.T) {
+	c := controller{
+		options: common.Options{
+			GatewayHttpPort:  80,
+			GatewayHttpsPort: 8443,
+		},
+	}
+	wrapper := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "app",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	gatewayOptions := &common.ConvertOptions{
+		Gateways:           map[string]*common.WrapperGateway{},
+		IngressDomainCache: common.NewIngressDomainCache(),
+	}
+	if err := c.ConvertGateway(gatewayOptions, wrapper, nil); err != nil {
+		t.Fatalf("ConvertGateway() error = %v", err)
+	}
+	tlsServer := gatewayOptions.Gateways["example.com"].Gateway.Servers[1]
+	if tlsServer.Port.Number != 8443 {
+		t.Fatalf("port mismatch, want 8443, got %d", tlsServer.Port.Number)
+	}
+}
+
+func TestSSLPassthroughCanaryIngressKeepsCanaryHandling(t *testing.T) {
+	c := controller{}
+	wrapper := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-canary",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "app-canary",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			Canary:         &annotations.CanaryConfig{Enabled: true},
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	routeOptions := &common.ConvertOptions{}
+	if err := c.ConvertHTTPRoute(routeOptions, wrapper); err != nil {
+		t.Fatalf("ConvertHTTPRoute() error = %v", err)
+	}
+	if len(routeOptions.CanaryIngresses) != 1 {
+		t.Fatalf("canary ingress count mismatch, want 1, got %d", len(routeOptions.CanaryIngresses))
+	}
+	if len(routeOptions.VirtualServices) != 0 {
+		t.Fatalf("unexpected virtual services: %+v", routeOptions.VirtualServices)
+	}
+}
+
+func TestSSLPassthroughSkipsDuplicatedTLSHost(t *testing.T) {
+	c := controller{
+		options: common.Options{
+			GatewayHttpPort:  80,
+			GatewayHttpsPort: 443,
+		},
+	}
+	primary := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-primary",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "primary",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+	duplicate := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-duplicate",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "duplicate",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	options := &common.ConvertOptions{
+		Gateways:                 map[string]*common.WrapperGateway{},
+		IngressDomainCache:       common.NewIngressDomainCache(),
+		PassthroughTLSHostOwners: map[string]*config.Config{"example.com": primary.Config},
+	}
+	if err := c.ConvertGateway(options, primary, nil); err != nil {
+		t.Fatalf("ConvertGateway(primary) error = %v", err)
+	}
+	if err := c.ConvertGateway(options, duplicate, nil); err != nil {
+		t.Fatalf("ConvertGateway(duplicate) error = %v", err)
+	}
+	options.VirtualServices = map[string]*common.WrapperVirtualService{}
+	if err := c.ConvertTLSRoute(options, duplicate); err != nil {
+		t.Fatalf("ConvertTLSRoute() error = %v", err)
+	}
+	if len(options.VirtualServices) != 0 {
+		t.Fatalf("unexpected virtual services: %+v", options.VirtualServices)
+	}
+}
+
+func TestSSLPassthroughDuplicateTLSHostUsesExistingGatewayOwner(t *testing.T) {
+	c := controller{
+		options: common.Options{
+			GatewayHttpPort:  80,
+			GatewayHttpsPort: 443,
+		},
+	}
+	primary := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-primary",
+			},
+			Spec: ingress.IngressSpec{
+				TLS: []ingress.IngressTLS{
+					{Hosts: []string{"example.com"}},
+				},
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "primary",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{},
+	}
+	duplicate := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-duplicate",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "duplicate",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+	httpsCredentialConfig := &cert.Config{
+		CredentialConfig: []cert.CredentialEntry{
+			{
+				Domains:   []string{"example.com"},
+				TLSSecret: "default/example-tls",
+			},
+		},
+	}
+
+	options := &common.ConvertOptions{
+		Gateways:           map[string]*common.WrapperGateway{},
+		IngressDomainCache: common.NewIngressDomainCache(),
+	}
+	if err := c.ConvertGateway(options, primary, httpsCredentialConfig); err != nil {
+		t.Fatalf("ConvertGateway(primary) error = %v", err)
+	}
+	if err := c.ConvertGateway(options, duplicate, httpsCredentialConfig); err != nil {
+		t.Fatalf("ConvertGateway(duplicate) error = %v", err)
+	}
+
+	if len(options.IngressDomainCache.Invalid) != 1 {
+		t.Fatalf("invalid domain count mismatch, want 1, got %d", len(options.IngressDomainCache.Invalid))
+	}
+	invalid := options.IngressDomainCache.Invalid[0]
+	if !strings.Contains(invalid.Error, "tls-primary") {
+		t.Fatalf("invalid domain error does not reference existing gateway owner: %s", invalid.Error)
+	}
+}
+
+func TestBackendToTLSRouteDestinationRejectsEmptyMCPDestination(t *testing.T) {
+	c := controller{}
+	backend := &ingress.IngressBackend{}
+	config := &annotations.DestinationConfig{}
+
+	destinations, event := c.backendToTLSRouteDestination(backend, "default", config)
+	if event != common.InvalidBackendService {
+		t.Fatalf("event mismatch, want InvalidBackendService, got %s", event)
+	}
+	if len(destinations) != 0 {
+		t.Fatalf("destination count mismatch, want 0, got %d", len(destinations))
+	}
+}
+
+func TestSSLPassthroughUsesFirstRootOwnerWhenLaterIngressEnablesPassthrough(t *testing.T) {
+	c := controller{
+		options: common.Options{
+			GatewayHttpPort:  80,
+			GatewayHttpsPort: 443,
+		},
+	}
+	root := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "root",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					ingressV1Beta1Rule("example.com", ingressV1Beta1Path("/", "root", 443)),
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{},
+	}
+	passthrough := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "passthrough",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					ingressV1Beta1Rule("example.com", ingressV1Beta1Path("/passthrough", "passthrough", 443)),
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	options := &common.ConvertOptions{
+		Gateways:                 map[string]*common.WrapperGateway{},
+		IngressDomainCache:       common.NewIngressDomainCache(),
+		PassthroughTLSHostOwners: map[string]*config.Config{"example.com": root.Config},
+	}
+	if err := c.ConvertGateway(options, root, nil); err != nil {
+		t.Fatalf("ConvertGateway(root) error = %v", err)
+	}
+	if err := c.ConvertGateway(options, passthrough, nil); err != nil {
+		t.Fatalf("ConvertGateway(passthrough) error = %v", err)
+	}
+	gateway := options.Gateways["example.com"].Gateway
+	if len(gateway.Servers) != 2 {
+		t.Fatalf("server count mismatch, want 2, got %d", len(gateway.Servers))
+	}
+	if gateway.Servers[1].Tls.GetMode() != v1alpha3.ServerTLSSettings_PASSTHROUGH {
+		t.Fatalf("tls mode mismatch, want PASSTHROUGH, got %s", gateway.Servers[1].Tls.GetMode())
+	}
+
+	routeOptions := &common.ConvertOptions{
+		PassthroughTLSHostOwners: map[string]*config.Config{"example.com": root.Config},
+	}
+	if err := c.ConvertHTTPRoute(routeOptions, root); err != nil {
+		t.Fatalf("ConvertHTTPRoute(root) error = %v", err)
+	}
+	if err := c.ConvertHTTPRoute(routeOptions, passthrough); err != nil {
+		t.Fatalf("ConvertHTTPRoute(passthrough) error = %v", err)
+	}
+	routes := routeOptions.VirtualServices["example.com"].VirtualService.Tls
+	if len(routes) != 1 {
+		t.Fatalf("tls route count mismatch, want 1, got %d", len(routes))
+	}
+	if got := routes[0].Route[0].Destination.Host; got != "root.default.svc.cluster.local" {
+		t.Fatalf("destination host mismatch, want root.default.svc.cluster.local, got %s", got)
+	}
+}
+
+func TestSSLPassthroughNonRootIngressDoesNotBlockLaterRootIngress(t *testing.T) {
+	c := controller{
+		options: common.Options{
+			GatewayHttpPort:  80,
+			GatewayHttpsPort: 443,
+		},
+	}
+	nonRoot := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-non-root",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					ingressV1Beta1Rule("example.com", ingressV1Beta1Path("/api", "api", 8443)),
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+	root := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-root",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					ingressV1Beta1Rule("example.com", ingressV1Beta1Path("/", "root", 443)),
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	options := &common.ConvertOptions{
+		Gateways:           map[string]*common.WrapperGateway{},
+		IngressDomainCache: common.NewIngressDomainCache(),
+	}
+	if err := c.ConvertGateway(options, nonRoot, nil); err != nil {
+		t.Fatalf("ConvertGateway(nonRoot) error = %v", err)
+	}
+	if len(options.Gateways["example.com"].Gateway.Servers) != 1 {
+		t.Fatalf("non-root ingress server count mismatch, want 1, got %d", len(options.Gateways["example.com"].Gateway.Servers))
+	}
+	if err := c.ConvertGateway(options, root, nil); err != nil {
+		t.Fatalf("ConvertGateway(root) error = %v", err)
+	}
+	if options.Gateways["example.com"].Gateway.Servers[1].Tls.GetMode() != v1alpha3.ServerTLSSettings_PASSTHROUGH {
+		t.Fatal("root ingress did not create a TLS passthrough server")
+	}
+
+	options.VirtualServices = map[string]*common.WrapperVirtualService{}
+	if err := c.ConvertTLSRoute(options, root); err != nil {
+		t.Fatalf("ConvertTLSRoute(root) error = %v", err)
+	}
+	routes := options.VirtualServices["example.com"].VirtualService.Tls
+	if len(routes) != 1 {
+		t.Fatalf("tls route count mismatch, want 1, got %d", len(routes))
+	}
+	if got := routes[0].Route[0].Destination.Host; got != "root.default.svc.cluster.local" {
+		t.Fatalf("destination host mismatch, got %s", got)
+	}
+}
+
+func TestSSLPassthroughPreservesRepeatedHostInSameIngress(t *testing.T) {
+	c := controller{
+		options: common.Options{
+			GatewayHttpPort:  80,
+			GatewayHttpsPort: 443,
+		},
+	}
+	wrapper := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-repeated-host",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/health",
+										Backend: ingress.IngressBackend{
+											ServiceName: "health",
+											ServicePort: intstr.FromInt(8443),
+										},
+									},
+								},
+							},
+						},
+					},
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "root",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	options := &common.ConvertOptions{
+		Gateways:           map[string]*common.WrapperGateway{},
+		IngressDomainCache: common.NewIngressDomainCache(),
+	}
+	if err := c.ConvertGateway(options, wrapper, nil); err != nil {
+		t.Fatalf("ConvertGateway() error = %v", err)
+	}
+	options.VirtualServices = map[string]*common.WrapperVirtualService{}
+	if err := c.ConvertTLSRoute(options, wrapper); err != nil {
+		t.Fatalf("ConvertTLSRoute() error = %v", err)
+	}
+	routes := options.VirtualServices["example.com"].VirtualService.Tls
+	if len(routes) != 1 {
+		t.Fatalf("tls route count mismatch, want 1, got %d", len(routes))
+	}
+	if got := routes[0].Route[0].Destination.Host; got != "root.default.svc.cluster.local" {
+		t.Fatalf("destination host mismatch, got %s", got)
+	}
+}
+
+func TestSSLPassthroughUsesFirstRootBackendForRepeatedHost(t *testing.T) {
+	c := controller{}
+	wrapper := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-repeated-root",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "first",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "second",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	routeOptions := &common.ConvertOptions{}
+	if err := c.ConvertHTTPRoute(routeOptions, wrapper); err != nil {
+		t.Fatalf("ConvertHTTPRoute() error = %v", err)
+	}
+	routes := routeOptions.VirtualServices["example.com"].VirtualService.Tls
+	if len(routes) != 1 {
+		t.Fatalf("tls route count mismatch, want 1, got %d", len(routes))
+	}
+	if got := routes[0].Route[0].Destination.Host; got != "first.default.svc.cluster.local" {
+		t.Fatalf("destination host mismatch, got %s", got)
+	}
+}
+
+func TestSSLPassthroughHandlesMultipleHosts(t *testing.T) {
+	c := controller{}
+	testcases := []struct {
+		name       string
+		rules      []ingress.IngressRule
+		wantHosts  []string
+		wantRoutes map[string]string
+	}{
+		{
+			name: "root path first",
+			rules: []ingress.IngressRule{
+				ingressV1Beta1Rule("first.example.com", ingressV1Beta1Path("/", "first", 443)),
+				ingressV1Beta1Rule("middle.example.com", ingressV1Beta1Path("/health", "middle", 8443)),
+				ingressV1Beta1Rule("last.example.com", ingressV1Beta1Path("/health", "last", 8443)),
+			},
+			wantHosts: []string{"first.example.com"},
+			wantRoutes: map[string]string{
+				"first.example.com": "first.default.svc.cluster.local",
+			},
+		},
+		{
+			name: "root path middle",
+			rules: []ingress.IngressRule{
+				ingressV1Beta1Rule("first.example.com", ingressV1Beta1Path("/health", "first", 8443)),
+				ingressV1Beta1Rule("middle.example.com", ingressV1Beta1Path("/", "middle", 443)),
+				ingressV1Beta1Rule("last.example.com", ingressV1Beta1Path("/health", "last", 8443)),
+			},
+			wantHosts: []string{"middle.example.com"},
+			wantRoutes: map[string]string{
+				"middle.example.com": "middle.default.svc.cluster.local",
+			},
+		},
+		{
+			name: "root path last",
+			rules: []ingress.IngressRule{
+				ingressV1Beta1Rule("first.example.com", ingressV1Beta1Path("/health", "first", 8443)),
+				ingressV1Beta1Rule("middle.example.com", ingressV1Beta1Path("/health", "middle", 8443)),
+				ingressV1Beta1Rule("last.example.com", ingressV1Beta1Path("/", "last", 443)),
+			},
+			wantHosts: []string{"last.example.com"},
+			wantRoutes: map[string]string{
+				"last.example.com": "last.default.svc.cluster.local",
+			},
+		},
+		{
+			name: "multiple root hosts",
+			rules: []ingress.IngressRule{
+				ingressV1Beta1Rule("first.example.com", ingressV1Beta1Path("/", "first", 443)),
+				ingressV1Beta1Rule("middle.example.com", ingressV1Beta1Path("/", "middle", 443)),
+				ingressV1Beta1Rule("last.example.com", ingressV1Beta1Path("/", "last", 443)),
+			},
+			wantHosts: []string{"first.example.com", "middle.example.com", "last.example.com"},
+			wantRoutes: map[string]string{
+				"first.example.com":  "first.default.svc.cluster.local",
+				"middle.example.com": "middle.default.svc.cluster.local",
+				"last.example.com":   "last.default.svc.cluster.local",
+			},
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapper := &common.WrapperConfig{
+				Config: &config.Config{
+					Meta: config.Meta{
+						Namespace: "default",
+						Name:      "tls-passthrough-multi-host",
+					},
+					Spec: ingress.IngressSpec{
+						Rules: tc.rules,
+					},
+				},
+				AnnotationsConfig: &annotations.Ingress{
+					SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+				},
+			}
+
+			routeOptions := &common.ConvertOptions{}
+			if err := c.ConvertHTTPRoute(routeOptions, wrapper); err != nil {
+				t.Fatalf("ConvertHTTPRoute() error = %v", err)
+			}
+			for _, host := range tc.wantHosts {
+				routes := routeOptions.VirtualServices[host].VirtualService.Tls
+				if len(routes) != 1 {
+					t.Fatalf("tls route count mismatch for host %s, want 1, got %d", host, len(routes))
+				}
+				if got := routes[0].Route[0].Destination.Host; got != tc.wantRoutes[host] {
+					t.Fatalf("destination host mismatch for host %s, want %s, got %s", host, tc.wantRoutes[host], got)
+				}
+			}
+		})
+	}
+}
+
+func ingressV1Beta1Path(path, service string, port int32) ingress.HTTPIngressPath {
+	return ingress.HTTPIngressPath{
+		Path: path,
+		Backend: ingress.IngressBackend{
+			ServiceName: service,
+			ServicePort: intstr.FromInt(int(port)),
+		},
+	}
+}
+
+func ingressV1Beta1Rule(host string, paths ...ingress.HTTPIngressPath) ingress.IngressRule {
+	return ingress.IngressRule{
+		Host: host,
+		IngressRuleValue: ingress.IngressRuleValue{
+			HTTP: &ingress.HTTPIngressRuleValue{
+				Paths: paths,
+			},
+		},
+	}
+}
+
+func TestSSLPassthroughUsesRootPathBackend(t *testing.T) {
+	c := controller{}
+	wrapper := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-root",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/api",
+										Backend: ingress.IngressBackend{
+											ServiceName: "api",
+											ServicePort: intstr.FromInt(8443),
+										},
+									},
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "root",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	routeOptions := &common.ConvertOptions{}
+	if err := c.ConvertHTTPRoute(routeOptions, wrapper); err != nil {
+		t.Fatalf("ConvertHTTPRoute() error = %v", err)
+	}
+	routes := routeOptions.VirtualServices["example.com"].VirtualService.Tls
+	if len(routes) != 1 {
+		t.Fatalf("tls route count mismatch, want 1, got %d", len(routes))
+	}
+	if got := routes[0].Route[0].Destination.Host; got != "root.default.svc.cluster.local" {
+		t.Fatalf("destination host mismatch, got %s", got)
+	}
+}
+
+func TestSSLPassthroughWildcardHostKeepsVirtualServiceConsistent(t *testing.T) {
+	c := controller{}
+	wrapper := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-wildcard",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/",
+										Backend: ingress.IngressBackend{
+											ServiceName: "root",
+											ServicePort: intstr.FromInt(443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	routeOptions := &common.ConvertOptions{}
+	if err := c.ConvertHTTPRoute(routeOptions, wrapper); err != nil {
+		t.Fatalf("ConvertHTTPRoute() error = %v", err)
+	}
+	if err := c.ConvertTLSRoute(routeOptions, wrapper); err != nil {
+		t.Fatalf("ConvertTLSRoute() error = %v", err)
+	}
+
+	vs := routeOptions.VirtualServices[""].VirtualService
+	if got := vs.Hosts; len(got) != 1 || got[0] != "*" {
+		t.Fatalf("virtual service hosts mismatch, got %+v", got)
+	}
+	if len(vs.Tls) != 1 {
+		t.Fatalf("tls route count mismatch, want 1, got %d", len(vs.Tls))
+	}
+	if got := vs.Tls[0].Match[0].SniHosts; len(got) != 1 || got[0] != "*" {
+		t.Fatalf("sni hosts mismatch, got %+v", got)
+	}
+}
+
+func TestSSLPassthroughIgnoresNonRootPath(t *testing.T) {
+	c := controller{}
+	wrapper := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "tls-passthrough-non-root",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/api",
+										Backend: ingress.IngressBackend{
+											ServiceName: "api",
+											ServicePort: intstr.FromInt(8443),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			SSLPassthrough: &annotations.SSLPassthroughConfig{Enabled: true},
+		},
+	}
+
+	routeOptions := &common.ConvertOptions{}
+	if err := c.ConvertHTTPRoute(routeOptions, wrapper); err != nil {
+		t.Fatalf("ConvertHTTPRoute() error = %v", err)
+	}
+	if len(routeOptions.HTTPRoutes["example.com"]) != 1 {
+		t.Fatalf("http route count mismatch, want 1, got %d", len(routeOptions.HTTPRoutes["example.com"]))
+	}
+	if routes := routeOptions.VirtualServices["example.com"].VirtualService.Tls; len(routes) != 0 {
+		t.Fatalf("unexpected tls routes: %+v", routes)
+	}
+}
+
+func TestHTTPRouteUsesMCPDestinationForResourceBackend(t *testing.T) {
+	c := controller{}
+	apiGroup := "networking.higress.io"
+	wrapper := &common.WrapperConfig{
+		Config: &config.Config{
+			Meta: config.Meta{
+				Namespace: "default",
+				Name:      "ai-route",
+			},
+			Spec: ingress.IngressSpec{
+				Rules: []ingress.IngressRule{
+					{
+						Host: "ai.example.com",
+						IngressRuleValue: ingress.IngressRuleValue{
+							HTTP: &ingress.HTTPIngressRuleValue{
+								Paths: []ingress.HTTPIngressPath{
+									{
+										Path: "/v1/chat/completions",
+										Backend: ingress.IngressBackend{
+											Resource: &v1.TypedLocalObjectReference{
+												APIGroup: &apiGroup,
+												Kind:     "McpBridge",
+												Name:     "default",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		AnnotationsConfig: &annotations.Ingress{
+			Destination: &annotations.DestinationConfig{
+				McpDestination: []*v1alpha3.HTTPRouteDestination{
+					{
+						Destination: &v1alpha3.Destination{
+							Host: "llm-supplier-xxx.internal.dns",
+							Port: &v1alpha3.PortSelector{Number: 443},
+						},
+						Weight: 100,
+					},
+				},
+				WeightSum: 100,
+			},
+		},
+	}
+
+	routeOptions := &common.ConvertOptions{}
+	if err := c.ConvertHTTPRoute(routeOptions, wrapper); err != nil {
+		t.Fatalf("ConvertHTTPRoute() error = %v", err)
+	}
+
+	httpRoutes := routeOptions.HTTPRoutes["ai.example.com"]
+	if len(httpRoutes) != 1 {
+		t.Fatalf("http route count mismatch, want 1, got %d", len(httpRoutes))
+	}
+	routeDestinations := httpRoutes[0].HTTPRoute.Route
+	if len(routeDestinations) != 1 {
+		t.Fatalf("route destination count mismatch, want 1, got %d", len(routeDestinations))
+	}
+	destination := routeDestinations[0].Destination
+	if got := destination.Host; got != "llm-supplier-xxx.internal.dns" {
+		t.Fatalf("destination host mismatch, want llm-supplier-xxx.internal.dns, got %s", got)
+	}
+	if got := destination.GetPort().GetNumber(); got != 443 {
+		t.Fatalf("destination port mismatch, want 443, got %d", got)
 	}
 }
 
@@ -79,7 +1116,8 @@ func testApplyCanaryIngress(t *testing.T, c common.IngressController) {
 				wrapperConfig: nil,
 			},
 			expectNoError: false,
-		}, {
+		},
+		{
 			description: "convertOptions is not nil but empty",
 			input: struct {
 				options       *common.ConvertOptions
@@ -113,28 +1151,30 @@ func testApplyCanaryIngress(t *testing.T, c common.IngressController) {
 					},
 				},
 				wrapperConfig: &common.WrapperConfig{Config: &config.Config{
-					Spec: ingress.IngressSpec{Rules: []ingress.IngressRule{
-						{
-							Host: "test1",
-							IngressRuleValue: ingress.IngressRuleValue{
-								HTTP: &ingress.HTTPIngressRuleValue{
-									Paths: []ingress.HTTPIngressPath{
-										{
-											Path:     "/test",
-											PathType: &defaultPathType,
+					Spec: ingress.IngressSpec{
+						Rules: []ingress.IngressRule{
+							{
+								Host: "test1",
+								IngressRuleValue: ingress.IngressRuleValue{
+									HTTP: &ingress.HTTPIngressRuleValue{
+										Paths: []ingress.HTTPIngressPath{
+											{
+												Path:     "/test",
+												PathType: &defaultPathType,
+											},
 										},
 									},
 								},
 							},
 						},
-					},
 						Backend: &ingress.IngressBackend{},
 						TLS: []ingress.IngressTLS{
 							{
 								Hosts:      []string{"test1", "test2"},
 								SecretName: "test",
 							},
-						}},
+						},
+					},
 				}, AnnotationsConfig: &annotations.Ingress{}},
 			},
 			expectNoError: true,
@@ -201,28 +1241,30 @@ func testApplyDefaultBackend(t *testing.T, c common.IngressController) {
 					HTTPRoutes:        make(map[string][]*common.WrapperHTTPRoute),
 				},
 				wrapperConfig: &common.WrapperConfig{Config: &config.Config{
-					Spec: ingress.IngressSpec{Rules: []ingress.IngressRule{
-						{
-							Host: "test1",
-							IngressRuleValue: ingress.IngressRuleValue{
-								HTTP: &ingress.HTTPIngressRuleValue{
-									Paths: []ingress.HTTPIngressPath{
-										{
-											Path:     "/test",
-											PathType: &defaultPathType,
+					Spec: ingress.IngressSpec{
+						Rules: []ingress.IngressRule{
+							{
+								Host: "test1",
+								IngressRuleValue: ingress.IngressRuleValue{
+									HTTP: &ingress.HTTPIngressRuleValue{
+										Paths: []ingress.HTTPIngressPath{
+											{
+												Path:     "/test",
+												PathType: &defaultPathType,
+											},
 										},
 									},
 								},
 							},
 						},
-					},
 						Backend: &ingress.IngressBackend{},
 						TLS: []ingress.IngressTLS{
 							{
 								Hosts:      []string{"test1", "test2"},
 								SecretName: "test",
 							},
-						}},
+						},
+					},
 				}, AnnotationsConfig: &annotations.Ingress{}},
 			},
 			expectNoError: true,
@@ -245,7 +1287,7 @@ func TestIngressControllerConventions(t *testing.T) {
 
 	options := common.Options{IngressClass: "mse", ClusterId: "", EnableStatus: true}
 
-	secretController := secret.NewController(localKubeClient, options.ClusterId)
+	secretController := secret.NewController(localKubeClient, options)
 	ingressController := NewController(localKubeClient, client, options, secretController)
 
 	testcases := map[string]func(*testing.T, common.IngressController){
@@ -306,27 +1348,29 @@ func testConvertGateway(t *testing.T, c common.IngressController) {
 					Gateways: make(map[string]*common.WrapperGateway),
 				},
 				wrapperConfig: &common.WrapperConfig{Config: &config.Config{
-					Spec: ingress.IngressSpec{Rules: []ingress.IngressRule{
-						{
-							Host: "test1",
-							IngressRuleValue: ingress.IngressRuleValue{
-								HTTP: &ingress.HTTPIngressRuleValue{
-									Paths: []ingress.HTTPIngressPath{
-										{
-											Path: "/test",
+					Spec: ingress.IngressSpec{
+						Rules: []ingress.IngressRule{
+							{
+								Host: "test1",
+								IngressRuleValue: ingress.IngressRuleValue{
+									HTTP: &ingress.HTTPIngressRuleValue{
+										Paths: []ingress.HTTPIngressPath{
+											{
+												Path: "/test",
+											},
 										},
 									},
 								},
 							},
 						},
-					},
 						Backend: &ingress.IngressBackend{},
 						TLS: []ingress.IngressTLS{
 							{
 								Hosts:      []string{"test1", "test2"},
 								SecretName: "test",
 							},
-						}},
+						},
+					},
 				}, AnnotationsConfig: &annotations.Ingress{}},
 			},
 			expectNoError: true,
@@ -392,30 +1436,33 @@ func testConvertHTTPRoute(t *testing.T, c common.IngressController) {
 					IngressRouteCache: &common.IngressRouteCache{},
 					HTTPRoutes:        make(map[string][]*common.WrapperHTTPRoute),
 				},
-				wrapperConfig: &common.WrapperConfig{Config: &config.Config{
-					Spec: ingress.IngressSpec{Rules: []ingress.IngressRule{
-						{
-							Host: "test1",
-							IngressRuleValue: ingress.IngressRuleValue{
-								HTTP: &ingress.HTTPIngressRuleValue{
-									Paths: []ingress.HTTPIngressPath{
-										{
-											Path:     "/test",
-											PathType: &defaultPathType,
+				wrapperConfig: &common.WrapperConfig{
+					Config: &config.Config{
+						Spec: ingress.IngressSpec{
+							Rules: []ingress.IngressRule{
+								{
+									Host: "test1",
+									IngressRuleValue: ingress.IngressRuleValue{
+										HTTP: &ingress.HTTPIngressRuleValue{
+											Paths: []ingress.HTTPIngressPath{
+												{
+													Path:     "/test",
+													PathType: &defaultPathType,
+												},
+											},
 										},
 									},
 								},
 							},
-						},
-					},
-						Backend: &ingress.IngressBackend{},
-						TLS: []ingress.IngressTLS{
-							{
-								Hosts:      []string{"test1", "test2"},
-								SecretName: "test",
+							Backend: &ingress.IngressBackend{},
+							TLS: []ingress.IngressTLS{
+								{
+									Hosts:      []string{"test1", "test2"},
+									SecretName: "test",
+								},
 							},
-						}},
-				}, AnnotationsConfig: &annotations.Ingress{},
+						},
+					}, AnnotationsConfig: &annotations.Ingress{},
 				},
 			},
 			expectNoError: true,
@@ -483,25 +1530,26 @@ func testConvertTrafficPolicy(t *testing.T, c common.IngressController) {
 					HTTPRoutes:            make(map[string][]*common.WrapperHTTPRoute),
 				},
 				wrapperConfig: &common.WrapperConfig{Config: &config.Config{
-					Spec: ingress.IngressSpec{Rules: []ingress.IngressRule{
-						{
-							Host: "test1",
-							IngressRuleValue: ingress.IngressRuleValue{
-								HTTP: &ingress.HTTPIngressRuleValue{
-									Paths: []ingress.HTTPIngressPath{
-										{
-											Path:     "/test",
-											PathType: &defaultPathType,
-											Backend: ingress.IngressBackend{
-												ServiceName: "test",
-												ServicePort: intstr.FromInt(8080),
+					Spec: ingress.IngressSpec{
+						Rules: []ingress.IngressRule{
+							{
+								Host: "test1",
+								IngressRuleValue: ingress.IngressRuleValue{
+									HTTP: &ingress.HTTPIngressRuleValue{
+										Paths: []ingress.HTTPIngressPath{
+											{
+												Path:     "/test",
+												PathType: &defaultPathType,
+												Backend: ingress.IngressBackend{
+													ServiceName: "test",
+													ServicePort: intstr.FromInt(8080),
+												},
 											},
 										},
 									},
 								},
 							},
 						},
-					},
 						Backend: &ingress.IngressBackend{
 							ServiceName: "test",
 						},
@@ -510,7 +1558,8 @@ func testConvertTrafficPolicy(t *testing.T, c common.IngressController) {
 								Hosts:      []string{"test1", "test2"},
 								SecretName: "test",
 							},
-						}},
+						},
+					},
 				}, AnnotationsConfig: &annotations.Ingress{
 					LoadBalance: &annotations.LoadBalanceConfig{},
 				}},
@@ -599,7 +1648,8 @@ func testcreateDefaultRoute(t *testing.T, c *controller) {
 							Name:      "test",
 						},
 					},
-					AnnotationsConfig: &annotations.Ingress{}},
+					AnnotationsConfig: &annotations.Ingress{},
+				},
 				backend: &ingress.IngressBackend{
 					ServiceName: "test",
 					ServicePort: intstr.FromInt(8088),
@@ -924,7 +1974,8 @@ func TestSetDefaultMSEIngressOptionalField(t *testing.T) {
 			},
 			expect:      &ingress.Ingress{},
 			description: "nil",
-		}, {
+		},
+		{
 			input: struct{ ing *ingress.Ingress }{
 				ing: &ingress.Ingress{
 					Spec: ingress.IngressSpec{
@@ -947,7 +1998,8 @@ func TestSetDefaultMSEIngressOptionalField(t *testing.T) {
 				},
 			},
 			description: "tls host is empty",
-		}, {
+		},
+		{
 			input: struct{ ing *ingress.Ingress }{
 				ing: &ingress.Ingress{
 					Spec: ingress.IngressSpec{
@@ -971,7 +2023,8 @@ func TestSetDefaultMSEIngressOptionalField(t *testing.T) {
 				},
 			},
 			description: "tls host is not empty",
-		}, {
+		},
+		{
 			input: struct{ ing *ingress.Ingress }{
 				ing: &ingress.Ingress{
 					Spec: ingress.IngressSpec{
@@ -1009,7 +2062,8 @@ func TestSetDefaultMSEIngressOptionalField(t *testing.T) {
 				},
 			},
 			description: "http is nil",
-		}, {
+		},
+		{
 			input: struct{ ing *ingress.Ingress }{
 				ing: &ingress.Ingress{
 					Spec: ingress.IngressSpec{
@@ -1064,7 +2118,8 @@ func TestSetDefaultMSEIngressOptionalField(t *testing.T) {
 				},
 			},
 			description: "http is not nil but host is empty",
-		}, {
+		},
+		{
 			input: struct{ ing *ingress.Ingress }{
 				ing: &ingress.Ingress{
 					Spec: ingress.IngressSpec{
@@ -1134,48 +2189,55 @@ func TestIngressControllerProcessing(t *testing.T) {
 
 	options := common.Options{IngressClass: "mse", ClusterId: "", EnableStatus: true}
 
-	secretController := secret.NewController(localKubeClient, options.ClusterId)
-	q := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
+	secretController := secret.NewController(localKubeClient, options)
 
-	ingressInformer := fakeClient.KubeInformer().Networking().V1beta1().Ingresses()
-	serviceInformer := fakeClient.KubeInformer().Core().V1().Services()
+	opts := ktypes.InformerOptions{}
+	ingressInformer := util.GetInformerFiltered(fakeClient, opts, gvrIngressV1Beta1, &ingress.Ingress{},
+		func(options metav1.ListOptions) (runtime.Object, error) {
+			return fakeClient.Kube().NetworkingV1beta1().Ingresses(opts.Namespace).List(context.Background(), options)
+		},
+		func(options metav1.ListOptions) (watch.Interface, error) {
+			return fakeClient.Kube().NetworkingV1beta1().Ingresses(opts.Namespace).Watch(context.Background(), options)
+		})
+	ingressLister := networkinglister.NewIngressLister(ingressInformer.Informer.GetIndexer())
+	serviceInformer := schemakubeclient.GetInformerFilteredFromGVR(fakeClient, opts, gvr.Service)
+	serviceLister := listerv1.NewServiceLister(serviceInformer.Informer.GetIndexer())
 
 	ingressController := &controller{
 		options:          options,
-		queue:            q,
 		ingresses:        make(map[string]*ingress.Ingress),
-		ingressInformer:  ingressInformer.Informer(),
-		ingressLister:    ingressInformer.Lister(),
-		serviceInformer:  serviceInformer.Informer(),
-		serviceLister:    serviceInformer.Lister(),
+		ingressInformer:  ingressInformer,
+		ingressLister:    ingressLister,
+		serviceInformer:  serviceInformer,
+		serviceLister:    serviceLister,
 		secretController: secretController,
 	}
 
-	handler := controllers.LatestVersionHandlerFuncs(controllers.EnqueueForSelf(q))
-	ingressController.ingressInformer.AddEventHandler(handler)
+	ingressController.queue = controllers.NewQueue("ingress-test",
+		controllers.WithReconciler(ingressController.onEvent),
+		controllers.WithMaxAttempts(5))
+	_, _ = ingressController.ingressInformer.Informer.AddEventHandler(controllers.ObjectHandler(ingressController.queue.AddObject))
 
 	stopChan := make(chan struct{})
 	t.Cleanup(func() {
 		time.Sleep(3 * time.Second)
-		stopChan <- struct{}{}
+		close(stopChan)
 	})
 
-	go ingressController.ingressInformer.Run(stopChan)
-	go ingressController.serviceInformer.Run(stopChan)
+	go ingressController.ingressInformer.Start(stopChan)
+	go ingressController.serviceInformer.Start(stopChan)
 	go ingressController.secretController.Informer().Run(stopChan)
 
 	go ingressController.Run(stopChan)
-	go secretController.Run(stopChan)
 
-	ingressController.RegisterEventHandler(gvk.VirtualService, func(c1, c2 config.Config, e model.Event) {})
-	ingressController.RegisterEventHandler(gvk.DestinationRule, func(c1, c2 config.Config, e model.Event) {})
-	ingressController.RegisterEventHandler(gvk.EnvoyFilter, func(c1, c2 config.Config, e model.Event) {})
-	ingressController.RegisterEventHandler(gvk.Gateway, func(c1, c2 config.Config, e model.Event) {})
+	ingressController.RegisterEventHandler(gvk.VirtualService, func(c1, c2 config.Config, e istiomodel.Event) {})
+	ingressController.RegisterEventHandler(gvk.DestinationRule, func(c1, c2 config.Config, e istiomodel.Event) {})
+	ingressController.RegisterEventHandler(gvk.EnvoyFilter, func(c1, c2 config.Config, e istiomodel.Event) {})
+	ingressController.RegisterEventHandler(gvk.Gateway, func(c1, c2 config.Config, e istiomodel.Event) {})
 
-	serviceLister := ingressController.ServiceLister()
-	svcObj, err := fakeClient.CoreV1().Services("default").Create(context.Background(), &v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "test"}}, metav1.CreateOptions{})
+	svcObj, err := fakeClient.Kube().CoreV1().Services("default").Create(context.Background(), &v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "test"}}, metav1.CreateOptions{})
 	require.NoError(t, err)
-	err = serviceInformer.Informer().GetStore().Add(svcObj)
+	err = serviceInformer.Informer.GetStore().Add(svcObj)
 	require.NoError(t, err)
 	services, err := serviceLister.List(labels.Everything())
 	require.NoError(t, err)
@@ -1203,9 +2265,9 @@ func TestIngressControllerProcessing(t *testing.T) {
 			},
 		},
 	}
-	ingressObj, err := fakeClient.NetworkingV1beta1().Ingresses("default").Create(context.Background(), ingress1, metav1.CreateOptions{})
+	ingressObj, err := fakeClient.Kube().NetworkingV1beta1().Ingresses("default").Create(context.Background(), ingress1, metav1.CreateOptions{})
 	require.NoError(t, err)
-	err = ingressController.ingressInformer.GetStore().Add(ingressObj)
+	err = ingressController.ingressInformer.Informer.GetStore().Add(ingressObj)
 	require.NoError(t, err)
 	ingresses := ingressController.List()
 	require.Equal(t, 1, len(ingresses))
@@ -1233,7 +2295,7 @@ func TestIngressControllerProcessing(t *testing.T) {
 			},
 		},
 	}
-	err = ingressController.ingressInformer.GetStore().Add(ingress2)
+	err = ingressController.ingressInformer.Informer.GetStore().Add(ingress2)
 	require.NoError(t, err)
 	ingresses = ingressController.List()
 	require.Equal(t, 2, len(ingresses))
@@ -1310,7 +2372,7 @@ func TestCreateRuleKey(t *testing.T) {
 		buildHigressAnnotationKey("exact-" + annotations.MatchQuery + "-region"):           "beijing",
 		buildHigressAnnotationKey("prefix-" + annotations.MatchQuery + "-user-id"):         "user-",
 	}
-	expect := "higress.com-prefix-/foo" + sep + //host-pathType-path
+	expect := "higress.com-prefix-/foo" + sep + // host-pathType-path
 		"GET PUT" + sep + // method
 		"exact-:authority\tfoo.bar.com" + "\n" + "exact-abc\t123" + "\n" +
 		"prefix-:scheme\thtt" + "\n" + "prefix-def\t456" + sep + // header
@@ -1318,7 +2380,6 @@ func TestCreateRuleKey(t *testing.T) {
 
 	key := createRuleKey(annots, wrapperHttpRoute.PathFormat())
 	if diff := cmp.Diff(expect, key); diff != "" {
-
 		t.Errorf("CreateRuleKey() mismatch (-want +got):\n%s", diff)
 	}
 }

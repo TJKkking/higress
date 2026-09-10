@@ -1,36 +1,36 @@
 PLUGIN_NAME ?= hello-world
+PLUGIN_ROOT ?= extensions
 BUILDER_REGISTRY ?= higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/
 REGISTRY ?= higress-registry.cn-hangzhou.cr.aliyuncs.com/plugins/
-GO_VERSION ?= 1.19
-TINYGO_VERSION ?= 0.28.1
+GO_VERSION ?= 1.24.4
+TINYGO_VERSION ?= 0.29.0
 ORAS_VERSION ?= 1.0.0
 HIGRESS_VERSION ?= 1.0.0-rc
 USE_HIGRESS_TINYGO ?= false
-BUILDER ?= ${BUILDER_REGISTRY}wasm-go-builder:go${GO_VERSION}-tinygo${TINYGO_VERSION}-oras${ORAS_VERSION}
+BUILDER ?= ${BUILDER_REGISTRY}wasm-go-builder:go${GO_VERSION}-oras${ORAS_VERSION}
 BUILD_TIME := $(shell date "+%Y%m%d-%H%M%S")
 COMMIT_ID := $(shell git rev-parse --short HEAD 2>/dev/null)
 IMAGE_TAG = $(if $(strip $(PLUGIN_VERSION)),${PLUGIN_VERSION},${BUILD_TIME}-${COMMIT_ID})
 IMG ?= ${REGISTRY}${PLUGIN_NAME}:${IMAGE_TAG}
 GOPROXY := $(shell go env GOPROXY)
-EXTRA_TAGS ?=
 
 .DEFAULT:
 build:
 	DOCKER_BUILDKIT=1 docker build --build-arg PLUGIN_NAME=${PLUGIN_NAME} \
+	                            --build-arg PLUGIN_ROOT=${PLUGIN_ROOT} \
 	                            --build-arg BUILDER=${BUILDER}  \
 	                            --build-arg GOPROXY=$(GOPROXY) \
-	                            --build-arg EXTRA_TAGS=$(EXTRA_TAGS) \
 	                            -t ${IMG} \
-	                            --output extensions/${PLUGIN_NAME} \
+	                            --output ${PLUGIN_ROOT}/${PLUGIN_NAME} \
 	                            .
 	@echo ""
-	@echo "output wasm file: extensions/${PLUGIN_NAME}/plugin.wasm"
+	@echo "output wasm file: ${PLUGIN_ROOT}/${PLUGIN_NAME}/plugin.wasm"
 
 build-image:
 	DOCKER_BUILDKIT=1 docker build --build-arg PLUGIN_NAME=${PLUGIN_NAME} \
+	                            --build-arg PLUGIN_ROOT=${PLUGIN_ROOT} \
 	                            --build-arg BUILDER=${BUILDER}  \
 	                            --build-arg GOPROXY=$(GOPROXY) \
-	                            --build-arg EXTRA_TAGS=$(EXTRA_TAGS) \
 	                            -t ${IMG} \
 	                            .
 	@echo ""
@@ -46,13 +46,12 @@ build-push: build-image
 # If you want to use Go/TinyGo/Oras with another version, please modify GO_VERSION/TINYGO_VERSION/ORAS_VERSION.
 # After your wasm-go-builder image is built, you can use it to build plugin image.
 # e.g.
-#   PLUGIN_NAME=request-block BUILDER=<your-wasm-go-builder> make
+#   PLUGIN_ROOT=examples PLUGIN_NAME=request-block BUILDER=<your-wasm-go-builder> make
 builder:
 	docker buildx build --no-cache \
 			--platform linux/amd64,linux/arm64 \
 			--build-arg BASE_IMAGE=docker.io/ubuntu \
 			--build-arg GO_VERSION=$(GO_VERSION) \
-			--build-arg TINYGO_VERSION=$(TINYGO_VERSION) \
 			--build-arg ORAS_VERSION=$(ORAS_VERSION) \
 			--build-arg HIGRESS_VERSION=$(HIGRESS_VERSION) \
 			--build-arg USE_HIGRESS_TINYGO=$(USE_HIGRESS_TINYGO) \
@@ -64,14 +63,15 @@ builder:
 	@echo "image: ${BUILDER}"
 
 local-build:
-	tinygo build -scheduler=none -target=wasi -gc=custom -tags='custommalloc nottinygc_finalizer' \
-		-o extensions/${PLUGIN_NAME}/main.wasm \
-		extensions/${PLUGIN_NAME}/main.go
+	cd ${PLUGIN_ROOT}/${PLUGIN_NAME}; \
+	if [ -f prepare.sh ]; then sh ./prepare.sh; fi; \
+	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o ./main.wasm .
+
 	@echo ""
-	@echo "wasm: extensions/${PLUGIN_NAME}/main.wasm"
+	@echo "wasm: ${PLUGIN_ROOT}/${PLUGIN_NAME}/main.wasm"
 
 local-run:
-	python3 .devcontainer/gen_config.py ${PLUGIN_NAME}
-	envoy -c extensions/${PLUGIN_NAME}/config.yaml --concurrency 0 --log-level info --component-log-level wasm:debug
+	python3 .devcontainer/gen_config.py ${PLUGIN_NAME} ${PLUGIN_ROOT}
+	envoy -c ${PLUGIN_ROOT}/${PLUGIN_NAME}/config.yaml --concurrency 0 --log-level info --component-log-level wasm:debug
 
 local-all: local-build local-run

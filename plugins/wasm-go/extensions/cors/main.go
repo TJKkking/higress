@@ -18,14 +18,23 @@ import (
 	"cors/config"
 	"fmt"
 	"net/http"
+	"strings"
 
-	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/higress-group/wasm-go/pkg/log"
+	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
 )
 
-func main() {
+func main() {}
+
+const (
+	headerVary = "Vary"
+	varyOrigin = "Origin"
+)
+
+func init() {
 	wrapper.SetCtx(
 		"cors",
 		wrapper.ParseConfigBy(parseConfig),
@@ -34,7 +43,7 @@ func main() {
 	)
 }
 
-func parseConfig(json gjson.Result, corsConfig *config.CorsConfig, log wrapper.Log) error {
+func parseConfig(json gjson.Result, corsConfig *config.CorsConfig, log log.Log) error {
 	log.Debug("parseConfig()")
 	allowOrigins := json.Get("allow_origins").Array()
 	for _, origin := range allowOrigins {
@@ -71,7 +80,8 @@ func parseConfig(json gjson.Result, corsConfig *config.CorsConfig, log wrapper.L
 	return nil
 }
 
-func onHttpRequestHeaders(ctx wrapper.HttpContext, corsConfig config.CorsConfig, log wrapper.Log) types.Action {
+func onHttpRequestHeaders(ctx wrapper.HttpContext, corsConfig config.CorsConfig, log log.Log) types.Action {
+	ctx.DisableReroute()
 	log.Debug("onHttpRequestHeaders()")
 	requestUrl, _ := proxywasm.GetHttpRequestHeader(":path")
 	method, _ := proxywasm.GetHttpRequestHeader(":method")
@@ -90,32 +100,31 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, corsConfig config.CorsConfig,
 	// Set HttpContext
 	ctx.SetContext(config.HttpContextKey, httpCorsContext)
 
-	// Response forbidden when it is not valid cors request
-	if !httpCorsContext.IsValid {
-		headers := make([][2]string, 0)
-		headers = append(headers, [2]string{config.HeaderPluginTrace, "trace"})
-		proxywasm.SendHttpResponseWithDetail(http.StatusForbidden, "cors.forbidden", headers, []byte("Invalid CORS request"), -1)
-		return types.ActionPause
-	}
-
 	// Response directly when it is cors preflight request
-	if httpCorsContext.IsPreFlight {
+	if httpCorsContext.IsCorsRequest && httpCorsContext.IsPreFlight {
 		headers := make([][2]string, 0)
 		headers = append(headers, [2]string{config.HeaderPluginTrace, "trace"})
-		proxywasm.SendHttpResponseWithDetail(http.StatusOK, "cores.preflight", headers, nil, -1)
+		if !httpCorsContext.IsValid {
+			proxywasm.SendHttpResponseWithDetail(http.StatusNoContent, "cors.preflight.invalid", headers, nil, -1)
+			return types.ActionPause
+		}
+		headers = append(headers, buildCorsHeaders(httpCorsContext)...)
+		headers = appendVaryOriginHeader(headers, httpCorsContext.AllowOrigin)
+		proxywasm.SendHttpResponseWithDetail(http.StatusNoContent, "cors.preflight", headers, nil, -1)
 		return types.ActionPause
 	}
 
 	return types.ActionContinue
 }
 
-func onHttpResponseHeaders(ctx wrapper.HttpContext, corsConfig config.CorsConfig, log wrapper.Log) types.Action {
+func onHttpResponseHeaders(ctx wrapper.HttpContext, corsConfig config.CorsConfig, log log.Log) types.Action {
 	log.Debug("onHttpResponseHeaders()")
 	// Remove trace header if existed
 	proxywasm.RemoveHttpResponseHeader(config.HeaderPluginTrace)
 	// Remove upstream cors response headers if existed
 	proxywasm.RemoveHttpResponseHeader(config.HeaderAccessControlAllowOrigin)
 	proxywasm.RemoveHttpResponseHeader(config.HeaderAccessControlAllowMethods)
+	proxywasm.RemoveHttpResponseHeader(config.HeaderAccessControlAllowHeaders)
 	proxywasm.RemoveHttpResponseHeader(config.HeaderAccessControlExposeHeaders)
 	proxywasm.RemoveHttpResponseHeader(config.HeaderAccessControlAllowCredentials)
 	proxywasm.RemoveHttpResponseHeader(config.HeaderAccessControlMaxAge)
@@ -136,24 +145,52 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, corsConfig config.CorsConfig
 	}
 
 	// Add Cors headers when it is cors and valid request
-	if len(httpCorsContext.AllowOrigin) > 0 {
-		proxywasm.AddHttpResponseHeader(config.HeaderAccessControlAllowOrigin, httpCorsContext.AllowOrigin)
+	for _, header := range buildCorsHeaders(httpCorsContext) {
+		proxywasm.AddHttpResponseHeader(header[0], header[1])
 	}
-	if len(httpCorsContext.AllowMethods) > 0 {
-		proxywasm.AddHttpResponseHeader(config.HeaderAccessControlAllowMethods, httpCorsContext.AllowMethods)
-	}
-	if len(httpCorsContext.AllowHeaders) > 0 {
-		proxywasm.AddHttpResponseHeader(config.HeaderAccessControlAllowHeaders, httpCorsContext.AllowHeaders)
-	}
-	if len(httpCorsContext.ExposeHeaders) > 0 {
-		proxywasm.AddHttpResponseHeader(config.HeaderAccessControlExposeHeaders, httpCorsContext.ExposeHeaders)
-	}
-	if httpCorsContext.AllowCredentials {
-		proxywasm.AddHttpResponseHeader(config.HeaderAccessControlAllowCredentials, "true")
-	}
-	if httpCorsContext.MaxAge > 0 {
-		proxywasm.AddHttpResponseHeader(config.HeaderAccessControlMaxAge, fmt.Sprintf("%d", httpCorsContext.MaxAge))
-	}
+	addVaryOriginHeader(httpCorsContext.AllowOrigin)
 
 	return types.ActionContinue
+}
+
+func buildCorsHeaders(httpCorsContext config.HttpCorsContext) [][2]string {
+	headers := make([][2]string, 0, 6)
+	if len(httpCorsContext.AllowOrigin) > 0 {
+		headers = append(headers, [2]string{config.HeaderAccessControlAllowOrigin, httpCorsContext.AllowOrigin})
+	}
+	if len(httpCorsContext.AllowMethods) > 0 {
+		headers = append(headers, [2]string{config.HeaderAccessControlAllowMethods, httpCorsContext.AllowMethods})
+	}
+	if len(httpCorsContext.AllowHeaders) > 0 {
+		headers = append(headers, [2]string{config.HeaderAccessControlAllowHeaders, httpCorsContext.AllowHeaders})
+	}
+	if len(httpCorsContext.ExposeHeaders) > 0 {
+		headers = append(headers, [2]string{config.HeaderAccessControlExposeHeaders, httpCorsContext.ExposeHeaders})
+	}
+	if httpCorsContext.AllowCredentials {
+		headers = append(headers, [2]string{config.HeaderAccessControlAllowCredentials, "true"})
+	}
+	if httpCorsContext.MaxAge > 0 {
+		headers = append(headers, [2]string{config.HeaderAccessControlMaxAge, fmt.Sprintf("%d", httpCorsContext.MaxAge)})
+	}
+	return headers
+}
+
+func appendVaryOriginHeader(headers [][2]string, allowOrigin string) [][2]string {
+	if !shouldVaryOrigin(allowOrigin) {
+		return headers
+	}
+	return append(headers, [2]string{headerVary, varyOrigin})
+}
+
+func addVaryOriginHeader(allowOrigin string) {
+	if !shouldVaryOrigin(allowOrigin) {
+		return
+	}
+	proxywasm.AddHttpResponseHeader(headerVary, varyOrigin)
+}
+
+func shouldVaryOrigin(allowOrigin string) bool {
+	allowOrigin = strings.TrimSpace(allowOrigin)
+	return len(allowOrigin) > 0 && allowOrigin != "*"
 }

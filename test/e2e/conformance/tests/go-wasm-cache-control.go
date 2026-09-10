@@ -15,9 +15,10 @@
 package tests
 
 import (
-	"github.com/alibaba/higress/test/e2e/conformance/utils/http"
-	"github.com/alibaba/higress/test/e2e/conformance/utils/suite"
 	"testing"
+
+	"github.com/alibaba/higress/v2/test/e2e/conformance/utils/http"
+	"github.com/alibaba/higress/v2/test/e2e/conformance/utils/suite"
 )
 
 func init() {
@@ -48,7 +49,7 @@ var WasmPluginCacheControl = suite.ConformanceTest{
 					ExpectedResponse: http.Response{
 						StatusCode: 200,
 						Headers: map[string]string{
-							"Cache-Control": "maxAge=3600",
+							"Cache-Control": "max-age=3600",
 						},
 					},
 				},

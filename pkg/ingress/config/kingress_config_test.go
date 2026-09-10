@@ -18,17 +18,19 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/istio/pkg/cluster"
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ingress "knative.dev/networking/pkg/apis/networking/v1alpha1"
 
-	"github.com/alibaba/higress/pkg/ingress/kube/annotations"
-	"github.com/alibaba/higress/pkg/ingress/kube/common"
-	kcontrollerv1 "github.com/alibaba/higress/pkg/ingress/kube/kingress"
-	"github.com/alibaba/higress/pkg/kube"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/annotations"
+	"github.com/alibaba/higress/v2/pkg/ingress/kube/common"
+	kcontrollerv1 "github.com/alibaba/higress/v2/pkg/ingress/kube/kingress"
+	"github.com/alibaba/higress/v2/pkg/kube"
 )
 
 func TestNormalizeKWeightedCluster(t *testing.T) {
@@ -116,8 +118,15 @@ func TestConvertGatewaysForKIngress(t *testing.T) {
 		RawClusterId: "kingress__",
 	}
 	kingressV1Controller := kcontrollerv1.NewController(fake, fake, v1Options, nil)
-	m := NewKIngressConfig(fake, nil, "wakanda", "gw-123-istio")
-	m.remoteIngressControllers = map[string]common.KIngressController{
+	options := common.Options{
+		Enable:           true,
+		ClusterId:        "gw-123-istio",
+		RawClusterId:     "gw-123-istio__",
+		GatewayHttpPort:  80,
+		GatewayHttpsPort: 443,
+	}
+	m := NewKIngressConfig(fake, nil, "wakanda", options)
+	m.remoteIngressControllers = map[cluster.ID]common.KIngressController{
 		"kingress": kingressV1Controller,
 	}
 
@@ -393,7 +402,7 @@ func TestConvertGatewaysForKIngress(t *testing.T) {
 								Tls: &networking.ServerTLSSettings{
 									Mode:           networking.ServerTLSSettings_SIMPLE,
 									CredentialName: "kubernetes-ingress://kingress__/wakanda/foo-com",
-									//CipherSuites:   []string{"ECDHE-RSA-AES128-GCM-SHA256", "AES256-SHA"},
+									// CipherSuites:   []string{"ECDHE-RSA-AES128-GCM-SHA256", "AES256-SHA"},
 								},
 							},
 						},
@@ -432,7 +441,7 @@ func TestConvertGatewaysForKIngress(t *testing.T) {
 								Tls: &networking.ServerTLSSettings{
 									Mode:           networking.ServerTLSSettings_SIMPLE,
 									CredentialName: "kubernetes-ingress://kingress__/wakanda/test-com",
-									//CipherSuites:   []string{"ECDHE-RSA-AES128-GCM-SHA256", "AES256-SHA"},
+									// CipherSuites:   []string{"ECDHE-RSA-AES128-GCM-SHA256", "AES256-SHA"},
 								},
 							},
 						},
@@ -465,6 +474,13 @@ func TestConvertGatewaysForKIngress(t *testing.T) {
 		},
 	}
 
+	unexportedIgnoredTypes := []interface{}{
+		networking.Gateway{},
+		networking.Server{},
+		networking.Port{},
+		networking.ServerTLSSettings{},
+	}
+
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			result := m.convertGateways(testCase.inputConfig)
@@ -473,9 +489,14 @@ func TestConvertGatewaysForKIngress(t *testing.T) {
 			for _, item := range result {
 				host := common.GetHost(item.Annotations)
 				fmt.Print(item)
+				// assert.Equal(t, testCase.expect[host], item)
 				target[host] = item
+				// break
 			}
-			assert.Equal(t, testCase.expect, target)
+			// assert.Equal(t, testCase.expect, target)
+			if diff := cmp.Diff(target, testCase.expect, cmpopts.IgnoreUnexported(unexportedIgnoredTypes...)); diff != "" {
+				t.Errorf("convertGateways() mismatch (-want +got):\n%s", diff)
+			}
 		})
 	}
 }

@@ -17,8 +17,6 @@ package common
 import (
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"istio.io/istio/pilot/pkg/model"
@@ -28,7 +26,7 @@ import (
 	"istio.io/istio/pkg/config/schema/collections"
 	"k8s.io/apimachinery/pkg/labels"
 
-	. "github.com/alibaba/higress/pkg/ingress/log"
+	. "github.com/alibaba/higress/v2/pkg/ingress/log"
 )
 
 type PathType string
@@ -78,10 +76,10 @@ var (
 	ErrNotFound = errors.New("item not found")
 
 	Schemas = collection.SchemasFor(
-		collections.IstioNetworkingV1Alpha3Virtualservices,
-		collections.IstioNetworkingV1Alpha3Gateways,
-		collections.IstioNetworkingV1Alpha3Destinationrules,
-		collections.IstioNetworkingV1Alpha3Envoyfilters,
+		collections.VirtualService,
+		collections.Gateway,
+		collections.DestinationRule,
+		collections.EnvoyFilter,
 	)
 
 	clusterPrefix    string
@@ -97,8 +95,9 @@ func init() {
 
 type Options struct {
 	Enable               bool
-	ClusterId            string
+	ClusterId            cluster.ID
 	IngressClass         string
+	GatewayClass         string
 	WatchNamespace       string
 	RawClusterId         string
 	EnableStatus         bool
@@ -146,6 +145,41 @@ func (i *IngressDomainCache) Extract() model.IngressDomainCollection {
 	}
 }
 
+func SameConfig(left *config.Config, right *config.Config) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return GetClusterId(left.Annotations) == GetClusterId(right.Annotations) &&
+		left.Namespace == right.Namespace &&
+		left.Name == right.Name
+}
+
+func IsPassthroughTLSHostOwner(convertOptions *ConvertOptions, cfg *config.Config, host string) bool {
+	if convertOptions == nil || convertOptions.PassthroughTLSHostOwners == nil {
+		return true
+	}
+	return SameConfig(convertOptions.PassthroughTLSHostOwners[host], cfg)
+}
+
+func PassthroughTLSHostOwner(convertOptions *ConvertOptions, host string) *config.Config {
+	if convertOptions == nil || len(convertOptions.PassthroughTLSHostOwners) == 0 {
+		return nil
+	}
+	return convertOptions.PassthroughTLSHostOwners[host]
+}
+
+func HasPassthroughTLSHostOwner(convertOptions *ConvertOptions, cfg *config.Config) bool {
+	if convertOptions == nil || len(convertOptions.PassthroughTLSHostOwners) == 0 {
+		return false
+	}
+	for _, owner := range convertOptions.PassthroughTLSHostOwners {
+		if SameConfig(owner, cfg) {
+			return true
+		}
+	}
+	return false
+}
+
 type ConvertOptions struct {
 	HostWithRule2Ingress map[string]*config.Config
 
@@ -168,42 +202,16 @@ type ConvertOptions struct {
 
 	CanaryIngresses []*WrapperConfig
 
+	// Host to the first root-path ingress owner for hosts that have TLS passthrough enabled.
+	PassthroughTLSHostOwners map[string]*config.Config
+
 	Service2TrafficPolicy map[ServiceKey]*WrapperTrafficPolicy
 
+	ServiceWrappers map[string]*ServiceWrapper
+
+	ProxyWrappers map[string]*ProxyWrapper
+
 	HasDefaultBackend bool
-}
-
-// CreateOptions obtain options from cluster id.
-// The cluster id format is k8sClusterId ingressClass watchNamespace EnableStatus, delimited by _.
-func CreateOptions(clusterId cluster.ID) Options {
-	parts := strings.Split(clusterId.String(), "_")
-	// Old cluster key
-	if len(parts) < 3 {
-		out := Options{
-			RawClusterId: clusterId.String(),
-		}
-		if len(parts) > 0 {
-			out.ClusterId = parts[0]
-		}
-		return out
-	}
-
-	options := Options{
-		Enable:         true,
-		ClusterId:      parts[0],
-		IngressClass:   parts[1],
-		WatchNamespace: parts[2],
-		RawClusterId:   clusterId.String(),
-		// The status switch is enabled by default.
-		EnableStatus: true,
-	}
-
-	if len(parts) == 4 {
-		if enable, err := strconv.ParseBool(parts[3]); err == nil {
-			options.EnableStatus = enable
-		}
-	}
-	return options
 }
 
 type IngressRouteCache struct {
@@ -299,7 +307,7 @@ func (i *IngressRouteCache) Extract() model.IngressRouteCollection {
 }
 
 type IngressRouteBuilder struct {
-	ClusterId   string
+	ClusterId   cluster.ID
 	RouteName   string
 	Host        string
 	PathType    string
@@ -374,7 +382,7 @@ const (
 )
 
 type IngressDomainBuilder struct {
-	ClusterId string
+	ClusterId cluster.ID
 	Host      string
 	Protocol  Protocol
 	Event     Event

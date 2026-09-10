@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alibaba/higress/cmd/hgctl/config"
-	cfg "github.com/alibaba/higress/test/e2e/conformance/utils/config"
+	"github.com/alibaba/higress/hgctl/cmd/hgctl/config"
+	cfg "github.com/alibaba/higress/v2/test/e2e/conformance/utils/config"
 	"github.com/tidwall/gjson"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
@@ -193,7 +193,7 @@ func awaitConvergence(t *testing.T, threshold int, maxTimeToConsistency time.Dur
 		select {
 		// Capture the overall timeout
 		case <-to:
-			t.Fatalf("timeout while waiting after %d attempts, %d/%d sucessess", attempts, successes, threshold)
+			t.Fatalf("timeout while waiting after %d attempts, %d/%d successes", attempts, successes, threshold)
 			// And the per-try delay
 		case <-time.After(delay):
 		}
